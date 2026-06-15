@@ -211,6 +211,44 @@ export type Database = {
           },
         ]
       }
+      withdrawal_requests: {
+        Row: {
+          id: string
+          user_id: string
+          amount: number
+          status: string
+          admin_notes: string | null
+          created_at: string | null
+          updated_at: string | null
+        }
+        Insert: {
+          id?: string
+          user_id: string
+          amount: number
+          status?: string
+          admin_notes?: string | null
+          created_at?: string | null
+          updated_at?: string | null
+        }
+        Update: {
+          id?: string
+          user_id?: string
+          amount?: number
+          status?: string
+          admin_notes?: string | null
+          created_at?: string | null
+          updated_at?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "withdrawal_requests_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       notifications: {
         Row: {
           created_at: string | null
@@ -575,6 +613,94 @@ export type Database = {
         }
       }
       complete_deal_escrow: { Args: { p_deal_id: string }; Returns: undefined }
+      complete_deal: { Args: { p_deal_id: string }; Returns: undefined }
+      place_deal_order: {
+        Args: {
+          p_deal_id: string
+          p_tracking_id?: string | null
+          p_order_screenshot_url?: string | null
+        }
+        Returns: {
+          id: string
+          deal_id: string
+          customer_id: string
+          tracking_id: string | null
+          order_screenshot_url: string | null
+          status: string
+          created_at: string | null
+        }
+      }
+      list_open_deals: {
+        Args: Record<string, never>
+        Returns: {
+          id: string
+          merchant_id: string
+          product_name: string
+          product_link: string
+          original_price: number
+          card_offer_price: number
+          expected_buy_price: number
+          commission_amount: number
+          required_card: string
+          admin_contact_number: string | null
+          status: Database["public"]["Enums"]["deal_status"] | null
+          customer_id: string | null
+          advance_amount: number
+          remaining_amount: number
+          created_at: string | null
+          updated_at: string | null
+        }[]
+      }
+      get_deal_accept_preview: {
+        Args: { p_deal_id: string }
+        Returns: {
+          id: string
+          product_name: string
+          required_card: string
+          card_offer_price: number
+          commission_amount: number
+          delivery_address: string
+        }[]
+      }
+      get_deal_for_viewer: {
+        Args: { p_deal_id: string }
+        Returns: {
+          id: string
+          merchant_id: string
+          customer_id: string | null
+          product_name: string
+          product_link: string
+          original_price: number
+          card_offer_price: number
+          expected_buy_price: number
+          advance_amount: number
+          remaining_amount: number
+          commission_amount: number
+          required_card: string
+          delivery_address: string | null
+          admin_contact_number: string | null
+          status: string
+          admin_notes: string | null
+          created_at: string
+          updated_at: string
+        }[]
+      }
+      approve_kyc: {
+        Args: { p_kyc_id: string; p_notes?: string | null }
+        Returns: Database["public"]["Tables"]["kycs"]["Row"]
+      }
+      reject_kyc: {
+        Args: { p_kyc_id: string; p_notes?: string | null }
+        Returns: Database["public"]["Tables"]["kycs"]["Row"]
+      }
+      request_withdrawal: {
+        Args: { p_amount: number }
+        Returns: Database["public"]["Tables"]["withdrawal_requests"]["Row"]
+      }
+      complete_withdrawal: {
+        Args: { p_request_id: string }
+        Returns: Database["public"]["Tables"]["withdrawal_requests"]["Row"]
+      }
       get_next_admin_number: { Args: never; Returns: string }
       has_role: {
         Args: {

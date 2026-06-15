@@ -5,6 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/lib/supabase";
@@ -25,6 +26,7 @@ export default function CreateDeal() {
     expected_buy_price: "",
     required_card: "",
     commission_amount: "",
+    delivery_address: "",
   });
 
   // Calculate amounts automatically
@@ -33,12 +35,12 @@ export default function CreateDeal() {
   const expectedBuyPrice = parseFloat(formData.expected_buy_price) || 0;
   const commissionAmount = parseFloat(formData.commission_amount) || 0;
   
-  // Advance = what merchant pays upfront (card offer price)
+  // Card offer price = upfront checkout amount for the card holder
   const advanceAmount = cardOfferPrice;
   // Remaining = difference between expected buy price and card offer price
   const remainingAmount = Math.max(0, expectedBuyPrice - cardOfferPrice);
 
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     setFormData(prev => ({
       ...prev,
       [e.target.name]: e.target.value
@@ -58,6 +60,11 @@ export default function CreateDeal() {
       return;
     }
 
+    if (!formData.delivery_address.trim()) {
+      toast({ title: "Error", description: "Delivery address is required", variant: "destructive" });
+      return;
+    }
+
     setLoading(true);
 
     const { error } = await supabase.from("deals").insert({
@@ -69,6 +76,7 @@ export default function CreateDeal() {
       expected_buy_price: expectedBuyPrice,
       required_card: formData.required_card,
       commission_amount: commissionAmount,
+      delivery_address: formData.delivery_address.trim(),
       advance_amount: advanceAmount,
       remaining_amount: remainingAmount,
       status: "pending"
@@ -95,8 +103,8 @@ export default function CreateDeal() {
             </Button>
           </Link>
           <div>
-            <h1 className="text-2xl font-bold">Create a Deal</h1>
-            <p className="text-muted-foreground">Find someone with the card you need</p>
+            <h1 className="text-2xl font-bold">Post a shopping request</h1>
+            <p className="text-muted-foreground">As a shopper — find a card holder to place your order</p>
           </div>
         </div>
 
@@ -155,6 +163,22 @@ export default function CreateDeal() {
                       className="pl-10"
                     />
                   </div>
+                </div>
+
+                <div>
+                  <Label htmlFor="delivery_address">Your delivery address</Label>
+                  <Textarea
+                    id="delivery_address"
+                    name="delivery_address"
+                    placeholder="Full name, phone, address, city, pincode — where the product should be delivered"
+                    value={formData.delivery_address}
+                    onChange={handleChange}
+                    required
+                    className="mt-1 min-h-[100px]"
+                  />
+                  <p className="text-xs text-muted-foreground mt-1">
+                    The card holder will ship to this address when they place the order
+                  </p>
                 </div>
               </div>
 
@@ -230,25 +254,25 @@ export default function CreateDeal() {
                         className="pl-10"
                       />
                     </div>
-                    <p className="text-xs text-muted-foreground mt-1">Customer's earning</p>
+                    <p className="text-xs text-muted-foreground mt-1">Cash reward for the card holder</p>
                   </div>
                 </div>
               </div>
 
               {/* Summary */}
               <div className="p-4 rounded-xl bg-secondary/50 space-y-2">
-                <h4 className="font-semibold">Payment Summary</h4>
+                <h4 className="font-semibold">Deal summary</h4>
                 <div className="flex justify-between text-sm">
-                  <span className="text-muted-foreground">Advance Amount</span>
+                  <span className="text-muted-foreground">Card offer price</span>
                   <span className="font-medium">₹{advanceAmount.toLocaleString()}</span>
                 </div>
                 <div className="flex justify-between text-sm">
-                  <span className="text-muted-foreground">Remaining Amount</span>
-                  <span className="font-medium">₹{remainingAmount.toLocaleString()}</span>
+                  <span className="text-muted-foreground">Expected buy price</span>
+                  <span className="font-medium">₹{expectedBuyPrice.toLocaleString()}</span>
                 </div>
                 <div className="flex justify-between text-sm pt-2 border-t">
-                  <span className="text-muted-foreground">Total to be Locked</span>
-                  <span className="font-bold">₹{(advanceAmount + remainingAmount).toLocaleString()}</span>
+                  <span className="text-muted-foreground">Commission</span>
+                  <span className="font-bold">₹{commissionAmount.toLocaleString()}</span>
                 </div>
               </div>
 

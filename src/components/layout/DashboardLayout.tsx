@@ -15,19 +15,18 @@ import {
   Menu,
   X,
   LogOut,
-  Zap,
   ChevronRight
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Logo } from "@/components/brand/Logo";
 
 const navItems = [
   { icon: LayoutDashboard, label: "Dashboard", href: "/dashboard" },
   { icon: ShoppingBag, label: "Browse Deals", href: "/deals" },
-  { icon: PlusCircle, label: "Create Deal", href: "/create-deal" },
+  { icon: PlusCircle, label: "Post Request", href: "/create-deal" },
   { icon: Wallet, label: "Wallet", href: "/wallet" },
   { icon: Bell, label: "Notifications", href: "/notifications" },
   { icon: FileCheck, label: "KYC", href: "/kyc" },
-  { icon: User, label: "Profile", href: "/profile" },
 ];
 
 const adminItems = [
@@ -51,11 +50,8 @@ export function DashboardLayout({ children }: { children: ReactNode }) {
     <>
       {/* Logo */}
       <div className="p-6 border-b border-border/50">
-        <Link to="/" className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl gradient-bg flex items-center justify-center shadow-glow">
-            <Zap className="w-5 h-5 text-primary-foreground" />
-          </div>
-          <span className="text-xl font-bold gradient-text">OfferBridge</span>
+        <Link to="/">
+          <Logo size="md" />
         </Link>
       </div>
 
@@ -138,11 +134,8 @@ export function DashboardLayout({ children }: { children: ReactNode }) {
           <Menu className="w-6 h-6" />
         </button>
         <div className="flex-1 flex items-center justify-center">
-          <Link to="/" className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-lg gradient-bg flex items-center justify-center">
-              <Zap className="w-4 h-4 text-primary-foreground" />
-            </div>
-            <span className="font-bold gradient-text">OfferBridge</span>
+          <Link to="/">
+            <Logo size="sm" />
           </Link>
         </div>
         <div className="w-10" />

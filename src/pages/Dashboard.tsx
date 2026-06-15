@@ -27,7 +27,10 @@ export default function Dashboard() {
 
   useEffect(() => {
     const fetchData = async () => {
-      if (!profile) return;
+      if (!profile) {
+        setLoading(false);
+        return;
+      }
 
       const [dealsRes, walletRes, kycRes] = await Promise.all([
         supabase
@@ -58,9 +61,9 @@ export default function Dashboard() {
     fetchData();
   }, [profile]);
 
-  const myDealsAsManager = deals.filter(d => d.merchant_id === profile?.id);
-  const myDealsAsCustomer = deals.filter(d => d.customer_id === profile?.id);
-  const pendingDeals = myDealsAsManager.filter(d => d.status === "pending");
+  const myDealsAsShopper = deals.filter(d => d.merchant_id === profile?.id);
+  const myDealsAsCardHolder = deals.filter(d => d.customer_id === profile?.id);
+  const pendingDeals = myDealsAsShopper.filter(d => d.status === "pending");
   const activeDeals = deals.filter(d => ["approved", "accepted", "in_progress"].includes(d.status));
 
   const getStatusVariant = (status: string) => {
@@ -73,6 +76,9 @@ export default function Dashboard() {
     }
   };
 
+  const prefersEarn = profile?.preferred_role === "accept_deals";
+  const prefersShop = profile?.preferred_role === "create_deals";
+
   return (
     <DashboardLayout>
       <div className="space-y-8">
@@ -82,7 +88,11 @@ export default function Dashboard() {
             Welcome back, <span className="gradient-text">{profile?.full_name?.split(" ")[0]}</span>!
           </h1>
           <p className="text-muted-foreground mt-1">
-            Here's what's happening with your deals today.
+            {prefersEarn
+              ? "Browse open deals and earn reimbursement + commission on your cards."
+              : prefersShop
+                ? "Track your shopping requests and card-holder payouts."
+                : "Shop with card discounts or earn by placing orders for others."}
           </p>
         </div>
 
@@ -96,7 +106,7 @@ export default function Dashboard() {
                 </div>
                 <div>
                   <p className="font-semibold">Complete Your KYC</p>
-                  <p className="text-sm text-muted-foreground">Verify your identity to start creating deals</p>
+                  <p className="text-sm text-muted-foreground">Verify your identity to withdraw earnings</p>
                 </div>
               </div>
               <Link to="/kyc">
@@ -137,7 +147,7 @@ export default function Dashboard() {
                 </div>
               </div>
               <p className="text-xs text-muted-foreground mt-2">
-                Locked: ₹{wallet?.locked_amount?.toLocaleString() || "0"}
+                Available for withdrawal after KYC
               </p>
             </CardContent>
           </Card>
@@ -146,8 +156,8 @@ export default function Dashboard() {
             <CardContent className="p-6">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-sm text-muted-foreground">My Deals Created</p>
-                  <p className="text-3xl font-bold mt-1">{myDealsAsManager.length}</p>
+                  <p className="text-sm text-muted-foreground">Requests posted</p>
+                  <p className="text-3xl font-bold mt-1">{myDealsAsShopper.length}</p>
                 </div>
                 <div className="w-12 h-12 rounded-2xl bg-primary/10 flex items-center justify-center">
                   <PlusCircle className="w-6 h-6 text-primary" />
@@ -163,8 +173,8 @@ export default function Dashboard() {
             <CardContent className="p-6">
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="text-sm text-muted-foreground">Deals Accepted</p>
-                  <p className="text-3xl font-bold mt-1">{myDealsAsCustomer.length}</p>
+                  <p className="text-sm text-muted-foreground">Deals accepted</p>
+                  <p className="text-3xl font-bold mt-1">{myDealsAsCardHolder.length}</p>
                 </div>
                 <div className="w-12 h-12 rounded-2xl bg-accent/10 flex items-center justify-center">
                   <ShoppingBag className="w-6 h-6 text-accent" />
@@ -196,6 +206,7 @@ export default function Dashboard() {
 
         {/* Quick Actions */}
         <div className="grid sm:grid-cols-2 gap-4">
+          {(prefersShop || profile?.preferred_role === "both") && (
           <Link to="/create-deal">
             <Card className="group hover:-translate-y-1 hover:shadow-lg hover:border-primary/30 transition-all duration-300 cursor-pointer">
               <CardContent className="flex items-center gap-4 p-6">
@@ -203,14 +214,16 @@ export default function Dashboard() {
                   <PlusCircle className="w-7 h-7 text-primary-foreground" />
                 </div>
                 <div>
-                  <h3 className="font-bold text-lg">Create a Deal</h3>
-                  <p className="text-sm text-muted-foreground">Find someone with the card you need</p>
+                  <h3 className="font-bold text-lg">Post a request</h3>
+                  <p className="text-sm text-muted-foreground">Shopper — need a card discount on a product</p>
                 </div>
                 <ArrowRight className="w-5 h-5 text-muted-foreground ml-auto group-hover:text-primary transition-colors" />
               </CardContent>
             </Card>
           </Link>
+          )}
 
+          {(prefersEarn || profile?.preferred_role === "both") && (
           <Link to="/deals">
             <Card className="group hover:-translate-y-1 hover:shadow-lg hover:border-primary/30 transition-all duration-300 cursor-pointer">
               <CardContent className="flex items-center gap-4 p-6">
@@ -218,13 +231,14 @@ export default function Dashboard() {
                   <ShoppingBag className="w-7 h-7 text-accent" />
                 </div>
                 <div>
-                  <h3 className="font-bold text-lg">Browse Deals</h3>
-                  <p className="text-sm text-muted-foreground">Accept deals and earn commission</p>
+                  <h3 className="font-bold text-lg">Browse deals</h3>
+                  <p className="text-sm text-muted-foreground">Card holder — accept deals and earn commission</p>
                 </div>
                 <ArrowRight className="w-5 h-5 text-muted-foreground ml-auto group-hover:text-accent transition-colors" />
               </CardContent>
             </Card>
           </Link>
+          )}
         </div>
 
         {/* Recent Deals */}
@@ -261,8 +275,9 @@ export default function Dashboard() {
             ) : (
               <div className="space-y-3">
                 {deals.slice(0, 5).map((deal) => (
-                  <div
+                  <Link
                     key={deal.id}
+                    to={`/deals/${deal.id}`}
                     className="flex items-center justify-between p-4 rounded-xl bg-secondary/30 hover:bg-secondary/50 transition-colors"
                   >
                     <div className="flex items-center gap-4">
@@ -272,7 +287,7 @@ export default function Dashboard() {
                       <div>
                         <p className="font-medium">{deal.product_name}</p>
                         <p className="text-sm text-muted-foreground">
-                          {deal.merchant_id === profile?.id ? "Created by you" : "Accepted by you"}
+                          {deal.merchant_id === profile?.id ? "Posted by you (shopper)" : "Accepted by you (card holder)"}
                         </p>
                       </div>
                     </div>
@@ -282,7 +297,7 @@ export default function Dashboard() {
                       </Badge>
                       <p className="text-sm font-medium mt-1">₹{deal.card_offer_price}</p>
                     </div>
-                  </div>
+                  </Link>
                 ))}
               </div>
             )}

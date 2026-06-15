@@ -1,85 +1,91 @@
-import { useState, useEffect } from "react";
-import { useNavigate, useSearchParams, Link } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { useNavigate, useSearchParams, Link, useLocation } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Label } from "@/components/ui/label";
+import { AuthUI } from "@/components/ui/auth-fuse";
 import { useToast } from "@/hooks/use-toast";
-import { Zap, Mail, Lock, User, ArrowLeft, Briefcase, HandCoins, Layers } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { ArrowLeft } from "lucide-react";
+import { formatAuthError } from "@/lib/auth-errors";
+import { supabase } from "@/lib/supabase";
+import type { AuthError } from "@supabase/supabase-js";
 
 const preferenceOptions = [
-  { value: "create_deals", label: "Create Deals", description: "I want to find card offers", icon: Briefcase },
-  { value: "accept_deals", label: "Accept & Earn", description: "I want to help and earn", icon: HandCoins },
-  { value: "both", label: "Both", description: "I want to do both", icon: Layers },
+  { value: "create_deals", label: "Shop", description: "I need a product at a card discount" },
+  { value: "accept_deals", label: "Earn", description: "I have cards and want to place orders for others" },
+  { value: "both", label: "Both", description: "Shop sometimes, earn with my cards too" },
 ];
 
+function signupRedirect(preferredRole: string): string {
+  switch (preferredRole) {
+    case "accept_deals":
+      return "/deals";
+    case "create_deals":
+      return "/create-deal";
+    case "both":
+      return "/dashboard";
+    default:
+      return "/dashboard";
+  }
+}
+
 export default function Auth() {
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const isSignUp = searchParams.get("mode") === "signup";
-  
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [fullName, setFullName] = useState("");
-  const [preferredRole, setPreferredRole] = useState("both");
   const [loading, setLoading] = useState(false);
-  
-  const { signIn, signUp, user } = useAuth();
+
+  const { signIn, signUp, signInWithGoogle, user, loading: authLoading } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  const redirectTo = (location.state as { from?: string } | null)?.from ?? "/dashboard";
   const { toast } = useToast();
 
   useEffect(() => {
-    if (user) {
-      navigate("/dashboard");
+    const params = new URLSearchParams(window.location.search);
+    const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+    const authError = params.get("error_description") ?? hashParams.get("error_description");
+
+    if (authError) {
+      const decoded = decodeURIComponent(authError.replace(/\+/g, " "));
+      toast({
+        title: "Sign In Failed",
+        description: formatAuthError({
+          message: decoded,
+          code: decoded.toLowerCase().includes("provider") ? "validation_failed" : undefined,
+        } as AuthError),
+        variant: "destructive",
+      });
+      window.history.replaceState({}, "", window.location.pathname + window.location.search);
     }
-  }, [user, navigate]);
+  }, [toast]);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  useEffect(() => {
+    if (!authLoading && user) {
+      navigate(redirectTo, { replace: true });
+    }
+  }, [user, authLoading, navigate, redirectTo]);
+
+  const handleSignIn = async (email: string, password: string) => {
     setLoading(true);
-
     try {
-      if (isSignUp) {
-        if (!fullName.trim()) {
-          toast({
-            title: "Error",
-            description: "Please enter your full name",
-            variant: "destructive",
-          });
-          setLoading(false);
-          return;
-        }
-
-        const { error } = await signUp(email, password, fullName, preferredRole);
-        
-        if (error) {
-          toast({
-            title: "Sign Up Failed",
-            description: error.message,
-            variant: "destructive",
-          });
-        } else {
-          toast({
-            title: "Account Created!",
-            description: "Welcome to OfferBridge. Let's get started!",
-          });
-          navigate("/dashboard");
-        }
-      } else {
-        const { error } = await signIn(email, password);
-        
-        if (error) {
-          toast({
-            title: "Sign In Failed",
-            description: error.message,
-            variant: "destructive",
-          });
-        } else {
-          navigate("/dashboard");
-        }
+      const { error, session } = await signIn(email, password);
+      if (error) {
+        toast({
+          title: "Sign In Failed",
+          description: formatAuthError(error),
+          variant: "destructive",
+        });
+        return;
       }
-    } catch (err) {
+
+      if (session) {
+        navigate(redirectTo, { replace: true });
+        return;
+      }
+
+      const { data: { session: refreshed } } = await supabase.auth.getSession();
+      if (refreshed) {
+        navigate(redirectTo, { replace: true });
+      }
+    } catch {
       toast({
         title: "Error",
         description: "An unexpected error occurred",
@@ -90,153 +96,133 @@ export default function Auth() {
     }
   };
 
-  return (
-    <div className="min-h-screen bg-background flex items-center justify-center p-4">
-      {/* Background decorations */}
-      <div className="fixed inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute -top-40 -right-40 w-96 h-96 rounded-full bg-primary/10 blur-3xl" />
-        <div className="absolute bottom-0 -left-40 w-80 h-80 rounded-full bg-accent/10 blur-3xl" />
-      </div>
+  const handleSignUp = async ({
+    fullName,
+    email,
+    password,
+    preferredRole,
+  }: {
+    fullName: string;
+    email: string;
+    password: string;
+    preferredRole: string;
+  }) => {
+    if (!fullName.trim()) {
+      toast({
+        title: "Error",
+        description: "Please enter your full name",
+        variant: "destructive",
+      });
+      return;
+    }
 
-      <div className="w-full max-w-md relative">
-        <Link to="/" className="inline-flex items-center text-muted-foreground hover:text-foreground mb-8 transition-colors">
-          <ArrowLeft className="w-4 h-4 mr-2" />
+    setLoading(true);
+    try {
+      const { error, session, needsEmailConfirmation } = await signUp(
+        email,
+        password,
+        fullName,
+        preferredRole,
+      );
+
+      if (error) {
+        toast({
+          title: "Sign Up Failed",
+          description: formatAuthError(error),
+          variant: "destructive",
+        });
+        return;
+      }
+
+      if (needsEmailConfirmation) {
+        toast({
+          title: "Confirm your email",
+          description:
+            "We sent a verification link. Open it, then sign in. For local dev, you can turn off Confirm email in Supabase → Authentication → Providers → Email.",
+        });
+        setSearchParams({});
+        return;
+      }
+
+      const destination = redirectTo === "/dashboard" ? signupRedirect(preferredRole) : redirectTo;
+
+      if (session) {
+        toast({
+          title: "Account Created!",
+          description: preferredRole === "accept_deals"
+            ? "Browse open deals and start earning."
+            : "Welcome — you're ready to go.",
+        });
+        navigate(destination, { replace: true });
+        return;
+      }
+
+      const { data: { session: refreshed } } = await supabase.auth.getSession();
+      if (refreshed) {
+        navigate(destination, { replace: true });
+      }
+    } catch {
+      toast({
+        title: "Error",
+        description: "An unexpected error occurred",
+        variant: "destructive",
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleGoogleSignIn = async () => {
+    setLoading(true);
+    try {
+      const { error } = await signInWithGoogle();
+      if (error) {
+        toast({
+          title: "Google Sign In Failed",
+          description: formatAuthError(error),
+          variant: "destructive",
+        });
+        setLoading(false);
+      }
+    } catch {
+      toast({
+        title: "Error",
+        description: "An unexpected error occurred",
+        variant: "destructive",
+      });
+      setLoading(false);
+    }
+  };
+
+  const handleModeChange = (signInMode: boolean) => {
+    if (signInMode) {
+      setSearchParams({});
+    } else {
+      setSearchParams({ mode: "signup" });
+    }
+  };
+
+  return (
+    <div className="relative min-h-screen overflow-x-hidden border-0 bg-background outline-none">
+      <header className="absolute left-0 top-0 z-20 px-4 py-3 md:w-1/2 md:px-8">
+        <Link
+          to="/"
+          className="inline-flex items-center text-sm text-muted-foreground transition-colors hover:text-foreground"
+        >
+          <ArrowLeft className="mr-2 h-4 w-4" />
           Back to home
         </Link>
+      </header>
 
-        <Card className="border-border/50 shadow-2xl">
-          <CardHeader className="text-center pb-2">
-            <div className="w-16 h-16 rounded-2xl gradient-bg flex items-center justify-center mx-auto mb-4 shadow-glow">
-              <Zap className="w-8 h-8 text-primary-foreground" />
-            </div>
-            <CardTitle className="text-2xl">
-              {isSignUp ? "Create Account" : "Welcome Back"}
-            </CardTitle>
-            <CardDescription>
-              {isSignUp 
-                ? "Start your journey with OfferBridge" 
-                : "Sign in to your account to continue"}
-            </CardDescription>
-          </CardHeader>
-
-          <CardContent>
-            <form onSubmit={handleSubmit} className="space-y-4">
-              {isSignUp && (
-                <div className="space-y-2">
-                  <Label htmlFor="fullName">Full Name</Label>
-                  <div className="relative">
-                    <User className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground" />
-                    <Input
-                      id="fullName"
-                      type="text"
-                      placeholder="John Doe"
-                      value={fullName}
-                      onChange={(e) => setFullName(e.target.value)}
-                      className="pl-10"
-                      required
-                    />
-                  </div>
-                </div>
-              )}
-
-              <div className="space-y-2">
-                <Label htmlFor="email">Email</Label>
-                <div className="relative">
-                  <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground" />
-                  <Input
-                    id="email"
-                    type="email"
-                    placeholder="you@example.com"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    className="pl-10"
-                    required
-                  />
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="password">Password</Label>
-                <div className="relative">
-                  <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground" />
-                  <Input
-                    id="password"
-                    type="password"
-                    placeholder="••••••••"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    className="pl-10"
-                    required
-                    minLength={6}
-                  />
-                </div>
-              </div>
-
-              {isSignUp && (
-                <div className="space-y-3">
-                  <Label>How do you want to use OfferBridge?</Label>
-                  <div className="grid gap-3">
-                    {preferenceOptions.map((option) => (
-                      <button
-                        key={option.value}
-                        type="button"
-                        onClick={() => setPreferredRole(option.value)}
-                        className={cn(
-                          "flex items-center gap-4 p-4 rounded-xl border-2 text-left transition-all duration-200",
-                          preferredRole === option.value
-                            ? "border-primary bg-primary/5"
-                            : "border-border hover:border-primary/50 hover:bg-secondary/50"
-                        )}
-                      >
-                        <div className={cn(
-                          "w-10 h-10 rounded-xl flex items-center justify-center",
-                          preferredRole === option.value
-                            ? "gradient-bg"
-                            : "bg-secondary"
-                        )}>
-                          <option.icon className={cn(
-                            "w-5 h-5",
-                            preferredRole === option.value
-                              ? "text-primary-foreground"
-                              : "text-muted-foreground"
-                          )} />
-                        </div>
-                        <div>
-                          <p className="font-semibold">{option.label}</p>
-                          <p className="text-sm text-muted-foreground">{option.description}</p>
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <Button
-                type="submit"
-                variant="hero"
-                size="lg"
-                className="w-full"
-                disabled={loading}
-              >
-                {loading ? "Please wait..." : isSignUp ? "Create Account" : "Sign In"}
-              </Button>
-            </form>
-
-            <div className="mt-6 text-center">
-              <p className="text-sm text-muted-foreground">
-                {isSignUp ? "Already have an account?" : "Don't have an account?"}
-                {" "}
-                <Link
-                  to={isSignUp ? "/auth" : "/auth?mode=signup"}
-                  className="text-primary font-semibold hover:underline"
-                >
-                  {isSignUp ? "Sign In" : "Sign Up"}
-                </Link>
-              </p>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
+      <AuthUI
+        defaultSignIn={!isSignUp}
+        loading={loading}
+        preferenceOptions={preferenceOptions}
+        onModeChange={handleModeChange}
+        onSignIn={handleSignIn}
+        onSignUp={handleSignUp}
+        onGoogleSignIn={handleGoogleSignIn}
+      />
     </div>
   );
 }

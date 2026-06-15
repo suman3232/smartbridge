@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { DashboardLayout } from "@/components/layout/DashboardLayout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/hooks/use-toast";
-import { supabase, Deal } from "@/lib/supabase";
+import { supabase, Deal, KYC, WithdrawalRequest } from "@/lib/supabase";
 import { 
   Shield, 
   Clock, 
@@ -18,7 +18,8 @@ import {
   IndianRupee,
   Loader2,
   Package,
-  AlertCircle
+  FileCheck,
+  Banknote,
 } from "lucide-react";
 import { 
   AlertDialog,
@@ -38,6 +39,8 @@ export default function AdminPanel() {
   const { toast } = useToast();
   
   const [deals, setDeals] = useState<Deal[]>([]);
+  const [kycs, setKycs] = useState<KYC[]>([]);
+  const [withdrawals, setWithdrawals] = useState<WithdrawalRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [rejectDialog, setRejectDialog] = useState<{ open: boolean; dealId: string | null; notes: string }>({
@@ -54,19 +57,30 @@ export default function AdminPanel() {
 
   useEffect(() => {
     if (isAdmin) {
-      fetchDeals();
+      void fetchAll();
     }
   }, [isAdmin]);
 
-  const fetchDeals = async () => {
-    const { data, error } = await supabase
-      .from("deals")
-      .select("*")
-      .order("created_at", { ascending: false });
+  const fetchAll = async () => {
+    setLoading(true);
+    const [dealsRes, kycRes, withdrawalsRes] = await Promise.all([
+      supabase.from("deals").select("*").order("created_at", { ascending: false }),
+      supabase.from("kycs").select("*").order("created_at", { ascending: false }),
+      supabase.from("withdrawal_requests").select("*").order("created_at", { ascending: false }),
+    ]);
 
-    if (data) setDeals(data as Deal[]);
+    if (dealsRes.error) {
+      toast({ title: "Error", description: dealsRes.error.message, variant: "destructive" });
+    } else if (dealsRes.data) {
+      setDeals(dealsRes.data as Deal[]);
+    }
+
+    if (kycRes.data) setKycs(kycRes.data as KYC[]);
+    if (withdrawalsRes.data) setWithdrawals(withdrawalsRes.data as WithdrawalRequest[]);
     setLoading(false);
   };
+
+  const fetchDeals = fetchAll;
 
   const handleApprove = async (dealId: string) => {
     setActionLoading(dealId);
@@ -99,14 +113,70 @@ export default function AdminPanel() {
     if (error) {
       toast({ title: "Error", description: error.message, variant: "destructive" });
     } else {
-      toast({ title: "Deal Rejected", description: "Merchant has been notified" });
+      toast({ title: "Deal Rejected", description: "Shopper has been notified" });
       fetchDeals();
     }
   };
 
-  const pendingDeals = deals.filter(d => d.status === "pending");
-  const activeDeals = deals.filter(d => ["approved", "accepted", "in_progress"].includes(d.status));
-  const completedDeals = deals.filter(d => ["completed", "rejected", "cancelled"].includes(d.status));
+  const handleComplete = async (dealId: string) => {
+    setActionLoading(dealId);
+
+    const { error } = await supabase.rpc("complete_deal", { p_deal_id: dealId });
+
+    setActionLoading(null);
+
+    if (error) {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    } else {
+      toast({ title: "Deal completed", description: "Reimbursement + commission credited to card holder wallet" });
+      void fetchAll();
+    }
+  };
+
+  const handleApproveKyc = async (kycId: string) => {
+    setActionLoading(kycId);
+    const { error } = await supabase.rpc("approve_kyc", { p_kyc_id: kycId });
+    setActionLoading(null);
+    if (error) {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    } else {
+      toast({ title: "KYC approved" });
+      void fetchAll();
+    }
+  };
+
+  const handleRejectKyc = async (kycId: string) => {
+    setActionLoading(kycId);
+    const { error } = await supabase.rpc("reject_kyc", {
+      p_kyc_id: kycId,
+      p_notes: "Please resubmit with correct bank details.",
+    });
+    setActionLoading(null);
+    if (error) {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    } else {
+      toast({ title: "KYC rejected" });
+      void fetchAll();
+    }
+  };
+
+  const handleCompleteWithdrawal = async (requestId: string) => {
+    setActionLoading(requestId);
+    const { error } = await supabase.rpc("complete_withdrawal", { p_request_id: requestId });
+    setActionLoading(null);
+    if (error) {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    } else {
+      toast({ title: "Withdrawal completed", description: "Marked as transferred to bank" });
+      void fetchAll();
+    }
+  };
+
+  const pendingDeals = deals.filter((d) => d.status === "pending");
+  const pendingKycs = kycs.filter((k) => k.status === "pending");
+  const pendingWithdrawals = withdrawals.filter((w) => w.status === "pending");
+  const activeDeals = deals.filter((d) => ["approved", "accepted", "in_progress"].includes(d.status));
+  const completedDeals = deals.filter((d) => ["completed", "rejected", "cancelled"].includes(d.status));
 
   const getStatusVariant = (status: string) => {
     switch (status) {
@@ -169,11 +239,16 @@ export default function AdminPanel() {
           </div>
         )}
 
-        <div className="flex gap-2">
-          <a href={deal.product_link} target="_blank" rel="noopener noreferrer" className="flex-1">
+        <div className="flex flex-wrap gap-2">
+          <Link to={`/deals/${deal.id}`} className="flex-1 min-w-[80px]">
+            <Button variant="outline" size="sm" className="w-full">
+              Details
+            </Button>
+          </Link>
+          <a href={deal.product_link} target="_blank" rel="noopener noreferrer" className="flex-1 min-w-[80px]">
             <Button variant="outline" size="sm" className="w-full">
               <ExternalLink className="w-4 h-4 mr-1" />
-              View
+              Product
             </Button>
           </a>
           
@@ -183,7 +258,7 @@ export default function AdminPanel() {
                 size="sm" 
                 onClick={() => handleApprove(deal.id)}
                 disabled={actionLoading === deal.id}
-                className="flex-1"
+                className="flex-1 min-w-[100px]"
               >
                 {actionLoading === deal.id ? (
                   <Loader2 className="w-4 h-4 animate-spin" />
@@ -204,6 +279,24 @@ export default function AdminPanel() {
               </Button>
             </>
           )}
+
+          {deal.status === "in_progress" && (
+            <Button
+              size="sm"
+              onClick={() => handleComplete(deal.id)}
+              disabled={actionLoading === deal.id}
+              className="flex-1 min-w-[140px]"
+            >
+              {actionLoading === deal.id ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <>
+                  <CheckCircle className="w-4 h-4 mr-1" />
+                  Complete & pay
+                </>
+              )}
+            </Button>
+          )}
         </div>
       </CardContent>
     </Card>
@@ -219,7 +312,7 @@ export default function AdminPanel() {
           </div>
           <div>
             <h1 className="text-2xl font-bold">Admin Panel</h1>
-            <p className="text-muted-foreground">Manage deals and approvals</p>
+            <p className="text-muted-foreground">Yaper flow — approve requests, complete payouts, verify KYC</p>
           </div>
         </div>
 
@@ -275,6 +368,14 @@ export default function AdminPanel() {
               <CheckCircle className="w-4 h-4" />
               Completed ({completedDeals.length})
             </TabsTrigger>
+            <TabsTrigger value="kyc" className="gap-2">
+              <FileCheck className="w-4 h-4" />
+              KYC ({pendingKycs.length})
+            </TabsTrigger>
+            <TabsTrigger value="withdrawals" className="gap-2">
+              <Banknote className="w-4 h-4" />
+              Payouts ({pendingWithdrawals.length})
+            </TabsTrigger>
           </TabsList>
 
           <TabsContent value="pending" className="space-y-4">
@@ -324,6 +425,60 @@ export default function AdminPanel() {
               </div>
             )}
           </TabsContent>
+
+          <TabsContent value="kyc" className="space-y-4">
+            {pendingKycs.length === 0 ? (
+              <Card>
+                <CardContent className="py-12 text-center text-muted-foreground">No pending KYC submissions</CardContent>
+              </Card>
+            ) : (
+              <div className="grid md:grid-cols-2 gap-4">
+                {pendingKycs.map((kyc) => (
+                  <Card key={kyc.id}>
+                    <CardContent className="p-4 space-y-3">
+                      <p className="font-medium">User {kyc.user_id.slice(0, 8)}…</p>
+                      <p className="text-sm text-muted-foreground">PAN: {kyc.pan_number}</p>
+                      <p className="text-sm text-muted-foreground">Bank: {kyc.bank_name} · {kyc.ifsc_code}</p>
+                      <p className="text-sm text-muted-foreground">A/C: {kyc.account_number}</p>
+                      <div className="flex gap-2">
+                        <Button size="sm" onClick={() => handleApproveKyc(kyc.id)} disabled={actionLoading === kyc.id}>
+                          Approve
+                        </Button>
+                        <Button size="sm" variant="destructive" onClick={() => handleRejectKyc(kyc.id)} disabled={actionLoading === kyc.id}>
+                          Reject
+                        </Button>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+            )}
+          </TabsContent>
+
+          <TabsContent value="withdrawals" className="space-y-4">
+            {pendingWithdrawals.length === 0 ? (
+              <Card>
+                <CardContent className="py-12 text-center text-muted-foreground">No pending withdrawal requests</CardContent>
+              </Card>
+            ) : (
+              <div className="grid md:grid-cols-2 gap-4">
+                {pendingWithdrawals.map((req) => (
+                  <Card key={req.id}>
+                    <CardContent className="p-4 space-y-3">
+                      <p className="text-2xl font-bold">₹{req.amount.toLocaleString()}</p>
+                      <p className="text-sm text-muted-foreground">User {req.user_id.slice(0, 8)}…</p>
+                      <p className="text-xs text-muted-foreground">
+                        Requested {new Date(req.created_at).toLocaleString()}
+                      </p>
+                      <Button size="sm" onClick={() => handleCompleteWithdrawal(req.id)} disabled={actionLoading === req.id}>
+                        Mark transferred to bank
+                      </Button>
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+            )}
+          </TabsContent>
         </Tabs>
       </div>
 
@@ -333,7 +488,7 @@ export default function AdminPanel() {
           <AlertDialogHeader>
             <AlertDialogTitle>Reject Deal</AlertDialogTitle>
             <AlertDialogDescription>
-              Are you sure you want to reject this deal? The merchant will be notified.
+              Are you sure you want to reject this deal? The shopper will be notified.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <div className="py-4">

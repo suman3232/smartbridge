@@ -1,16 +1,22 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { DashboardLayout } from "@/components/layout/DashboardLayout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { useAuth } from "@/contexts/AuthContext";
-import { supabase, Wallet as WalletType } from "@/lib/supabase";
-import { 
-  Wallet as WalletIcon, 
-  Lock,
+import { useToast } from "@/hooks/use-toast";
+import { supabase, Wallet as WalletType, KYC, WithdrawalRequest } from "@/lib/supabase";
+import {
+  Wallet as WalletIcon,
   ArrowUpRight,
   ArrowDownLeft,
   IndianRupee,
-  History
+  History,
+  Loader2,
+  FileCheck,
 } from "lucide-react";
 
 type Payment = {
@@ -26,44 +32,84 @@ type Payment = {
 
 export default function Wallet() {
   const { profile } = useAuth();
+  const { toast } = useToast();
   const [wallet, setWallet] = useState<WalletType | null>(null);
+  const [kyc, setKyc] = useState<KYC | null>(null);
   const [payments, setPayments] = useState<Payment[]>([]);
+  const [withdrawals, setWithdrawals] = useState<WithdrawalRequest[]>([]);
   const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    if (profile) {
-      fetchData();
-    }
-  }, [profile]);
+  const [withdrawing, setWithdrawing] = useState(false);
+  const [withdrawAmount, setWithdrawAmount] = useState("");
 
   const fetchData = async () => {
-    if (!profile) return;
+    if (!profile) {
+      setLoading(false);
+      return;
+    }
 
-    const [walletRes, paymentsRes] = await Promise.all([
+    const [walletRes, kycRes, paymentsRes, withdrawalsRes] = await Promise.all([
+      supabase.from("wallets").select("*").eq("user_id", profile.id).maybeSingle(),
       supabase
-        .from("wallets")
+        .from("kycs")
         .select("*")
         .eq("user_id", profile.id)
+        .eq("status", "approved")
         .maybeSingle(),
       supabase
         .from("payments")
         .select("*")
         .or(`from_user_id.eq.${profile.id},to_user_id.eq.${profile.id}`)
         .order("created_at", { ascending: false })
-        .limit(20)
+        .limit(20),
+      supabase
+        .from("withdrawal_requests")
+        .select("*")
+        .eq("user_id", profile.id)
+        .order("created_at", { ascending: false })
+        .limit(10),
     ]);
 
     if (walletRes.data) setWallet(walletRes.data as WalletType);
+    if (kycRes.data) setKyc(kycRes.data as KYC);
     if (paymentsRes.data) setPayments(paymentsRes.data as Payment[]);
+    if (withdrawalsRes.data) setWithdrawals(withdrawalsRes.data as WithdrawalRequest[]);
     setLoading(false);
+  };
+
+  useEffect(() => {
+    void fetchData();
+  }, [profile]);
+
+  const handleWithdraw = async () => {
+    const amount = parseFloat(withdrawAmount);
+    if (!amount || amount <= 0) {
+      toast({ title: "Invalid amount", description: "Enter a valid withdrawal amount.", variant: "destructive" });
+      return;
+    }
+
+    setWithdrawing(true);
+    const { error } = await supabase.rpc("request_withdrawal", { p_amount: amount });
+    setWithdrawing(false);
+
+    if (error) {
+      toast({ title: "Withdrawal failed", description: error.message, variant: "destructive" });
+    } else {
+      toast({ title: "Withdrawal requested", description: "Admin will transfer to your verified bank account." });
+      setWithdrawAmount("");
+      void fetchData();
+    }
   };
 
   const getPaymentStatusVariant = (status: string) => {
     switch (status) {
-      case "released": return "success";
-      case "locked": return "pending";
-      case "refunded": return "secondary";
-      default: return "secondary";
+      case "released":
+        return "success";
+      case "locked":
+        return "pending";
+      case "refunded":
+        return "secondary";
+      default:
+        return "secondary";
     }
   };
 
@@ -72,50 +118,92 @@ export default function Wallet() {
   return (
     <DashboardLayout>
       <div className="space-y-6">
-        {/* Header */}
         <div>
           <h1 className="text-2xl font-bold">Wallet</h1>
-          <p className="text-muted-foreground">Manage your funds and transactions</p>
+          <p className="text-muted-foreground">Reimbursement + commission from completed deals</p>
         </div>
 
-        {/* Balance Cards */}
-        <div className="grid sm:grid-cols-2 gap-4">
-          <Card className="overflow-hidden">
-            <CardContent className="p-0">
-              <div className="gradient-bg p-6 text-primary-foreground">
-                <div className="flex items-center justify-between mb-4">
-                  <p className="text-sm opacity-80">Available Balance</p>
-                  <WalletIcon className="w-6 h-6 opacity-70" />
-                </div>
-                <p className="text-4xl font-bold">₹{wallet?.balance?.toLocaleString() || "0"}</p>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardContent className="p-6">
+        <Card className="overflow-hidden max-w-md">
+          <CardContent className="p-0">
+            <div className="gradient-bg p-6 text-primary-foreground">
               <div className="flex items-center justify-between mb-4">
-                <p className="text-sm text-muted-foreground">Locked Funds</p>
-                <div className="w-10 h-10 rounded-xl bg-warning/10 flex items-center justify-center">
-                  <Lock className="w-5 h-5 text-warning" />
-                </div>
+                <p className="text-sm opacity-80">Available balance</p>
+                <WalletIcon className="w-6 h-6 opacity-70" />
               </div>
-              <p className="text-3xl font-bold">₹{wallet?.locked_amount?.toLocaleString() || "0"}</p>
-              <p className="text-xs text-muted-foreground mt-2">
-                Funds held in escrow for active deals
-              </p>
+              <p className="text-4xl font-bold">₹{wallet?.balance?.toLocaleString() || "0"}</p>
+              {wallet && wallet.locked_amount > 0 && (
+                <p className="text-xs opacity-80 mt-2">
+                  ₹{wallet.locked_amount.toLocaleString()} pending withdrawal
+                </p>
+              )}
+            </div>
+          </CardContent>
+        </Card>
+
+        {kyc ? (
+          <Card className="max-w-md">
+            <CardHeader>
+              <CardTitle className="text-lg">Withdraw to bank</CardTitle>
+              <CardDescription>Transfer earnings to your verified account ({kyc.bank_name})</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div>
+                <Label htmlFor="withdraw">Amount (₹)</Label>
+                <Input
+                  id="withdraw"
+                  type="number"
+                  min="1"
+                  max={wallet?.balance ?? 0}
+                  value={withdrawAmount}
+                  onChange={(e) => setWithdrawAmount(e.target.value)}
+                  placeholder="Enter amount"
+                  className="mt-1"
+                />
+              </div>
+              <Button onClick={handleWithdraw} disabled={withdrawing || !wallet?.balance} className="w-full">
+                {withdrawing ? <Loader2 className="w-4 h-4 animate-spin" /> : "Request withdrawal"}
+              </Button>
             </CardContent>
           </Card>
-        </div>
+        ) : (
+          <Card className="max-w-md border-warning/30">
+            <CardContent className="flex items-center justify-between gap-4 p-4">
+              <div className="flex items-center gap-3">
+                <FileCheck className="w-5 h-5 text-warning" />
+                <p className="text-sm text-muted-foreground">Complete KYC to withdraw earnings</p>
+              </div>
+              <Link to="/kyc">
+                <Button size="sm" variant="warning">
+                  Verify KYC
+                </Button>
+              </Link>
+            </CardContent>
+          </Card>
+        )}
 
-        {/* Transaction History */}
+        {withdrawals.length > 0 && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Withdrawal requests</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {withdrawals.map((req) => (
+                <div key={req.id} className="flex items-center justify-between p-3 rounded-xl bg-secondary/30 text-sm">
+                  <span>₹{req.amount.toLocaleString()}</span>
+                  <Badge className="capitalize">{req.status}</Badge>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        )}
+
         <Card>
           <CardHeader>
             <div className="flex items-center gap-2">
               <History className="w-5 h-5 text-muted-foreground" />
               <CardTitle>Transaction History</CardTitle>
             </div>
-            <CardDescription>Your recent payments and transfers</CardDescription>
+            <CardDescription>Reimbursements, commissions, and withdrawals</CardDescription>
           </CardHeader>
           <CardContent>
             {loading ? (
@@ -130,7 +218,7 @@ export default function Wallet() {
                   <IndianRupee className="w-8 h-8 text-muted-foreground" />
                 </div>
                 <p className="text-muted-foreground">No transactions yet</p>
-                <p className="text-sm text-muted-foreground">Your payment history will appear here</p>
+                <p className="text-sm text-muted-foreground">Complete deals as a card holder to earn here</p>
               </div>
             ) : (
               <div className="space-y-3">
@@ -140,9 +228,11 @@ export default function Wallet() {
                     className="flex items-center justify-between p-4 rounded-xl bg-secondary/30 hover:bg-secondary/50 transition-colors"
                   >
                     <div className="flex items-center gap-4">
-                      <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${
-                        isIncoming(payment) ? "bg-success/10" : "bg-destructive/10"
-                      }`}>
+                      <div
+                        className={`w-10 h-10 rounded-xl flex items-center justify-center ${
+                          isIncoming(payment) ? "bg-success/10" : "bg-destructive/10"
+                        }`}
+                      >
                         {isIncoming(payment) ? (
                           <ArrowDownLeft className="w-5 h-5 text-success" />
                         ) : (
@@ -151,9 +241,7 @@ export default function Wallet() {
                       </div>
                       <div>
                         <p className="font-medium capitalize">{payment.payment_type.replace("_", " ")}</p>
-                        <p className="text-sm text-muted-foreground">
-                          {payment.description || "Payment"}
-                        </p>
+                        <p className="text-sm text-muted-foreground">{payment.description || "Payment"}</p>
                       </div>
                     </div>
                     <div className="text-right">

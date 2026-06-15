@@ -24,7 +24,9 @@ export default function Notifications() {
 
   useEffect(() => {
     if (profile) {
-      fetchNotifications();
+      void fetchNotifications();
+    } else {
+      setLoading(false);
     }
   }, [profile]);
 

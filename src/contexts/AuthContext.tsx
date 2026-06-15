@@ -1,6 +1,12 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
-import { User, Session } from "@supabase/supabase-js";
+import { User, Session, AuthError } from "@supabase/supabase-js";
 import { supabase, Profile } from "@/lib/supabase";
+
+export type AuthResult = {
+  error: AuthError | null;
+  session: Session | null;
+  needsEmailConfirmation: boolean;
+};
 
 type AuthContextType = {
   user: User | null;
@@ -8,8 +14,9 @@ type AuthContextType = {
   profile: Profile | null;
   isAdmin: boolean;
   loading: boolean;
-  signUp: (email: string, password: string, fullName: string, preferredRole: string) => Promise<{ error: Error | null }>;
-  signIn: (email: string, password: string) => Promise<{ error: Error | null }>;
+  signUp: (email: string, password: string, fullName: string, preferredRole: string) => Promise<AuthResult>;
+  signIn: (email: string, password: string) => Promise<AuthResult>;
+  signInWithGoogle: () => Promise<{ error: AuthError | null }>;
   signOut: () => Promise<void>;
   refreshProfile: () => Promise<void>;
 };
@@ -46,65 +53,90 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setIsAdmin(!!data);
   };
 
-  useEffect(() => {
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      (event, session) => {
-        setSession(session);
-        setUser(session?.user ?? null);
-        
-        if (session?.user) {
-          setTimeout(() => {
-            fetchProfile(session.user.id);
-            checkAdminRole(session.user.id);
-          }, 0);
-        } else {
-          setProfile(null);
-          setIsAdmin(false);
-        }
-        
-        setLoading(false);
-      }
-    );
+  const loadUserData = async (userId: string) => {
+    await Promise.all([fetchProfile(userId), checkAdminRole(userId)]);
+  };
 
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      setUser(session?.user ?? null);
-      
-      if (session?.user) {
-        fetchProfile(session.user.id);
-        checkAdminRole(session.user.id);
+  useEffect(() => {
+    let mounted = true;
+
+    const finishAuth = async (nextSession: Session | null) => {
+      if (!mounted) return;
+
+      setSession(nextSession);
+      setUser(nextSession?.user ?? null);
+
+      if (nextSession?.user) {
+        await loadUserData(nextSession.user.id);
+      } else {
+        setProfile(null);
+        setIsAdmin(false);
       }
-      
-      setLoading(false);
+
+      if (mounted) setLoading(false);
+    };
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      void finishAuth(nextSession);
     });
 
-    return () => subscription.unsubscribe();
+    supabase.auth.getSession().then(({ data: { session: nextSession } }) => {
+      void finishAuth(nextSession);
+    });
+
+    return () => {
+      mounted = false;
+      subscription.unsubscribe();
+    };
   }, []);
 
-  const signUp = async (email: string, password: string, fullName: string, preferredRole: string) => {
-    const redirectUrl = `${window.location.origin}/`;
-    
-    const { error } = await supabase.auth.signUp({
+  const signUp = async (email: string, password: string, fullName: string, preferredRole: string): Promise<AuthResult> => {
+    const redirectUrl = `${window.location.origin}/auth`;
+
+    const { data, error } = await supabase.auth.signUp({
       email,
       password,
       options: {
         emailRedirectTo: redirectUrl,
         data: {
           full_name: fullName,
-          preferred_role: preferredRole
-        }
-      }
+          preferred_role: preferredRole,
+        },
+      },
     });
-    
-    return { error };
+
+    return {
+      error,
+      session: data.session,
+      needsEmailConfirmation: !error && !!data.user && !data.session,
+    };
   };
 
-  const signIn = async (email: string, password: string) => {
-    const { error } = await supabase.auth.signInWithPassword({
+  const signIn = async (email: string, password: string): Promise<AuthResult> => {
+    const { data, error } = await supabase.auth.signInWithPassword({
       email,
-      password
+      password,
     });
-    
+
+    return {
+      error,
+      session: data.session,
+      needsEmailConfirmation: false,
+    };
+  };
+
+  const signInWithGoogle = async () => {
+    const { data, error } = await supabase.auth.signInWithOAuth({
+      provider: "google",
+      options: {
+        redirectTo: `${window.location.origin}/auth`,
+      },
+    });
+
+    if (!error && data.url) {
+      window.location.assign(data.url);
+    }
+
     return { error };
   };
 
@@ -130,6 +162,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       loading,
       signUp,
       signIn,
+      signInWithGoogle,
       signOut,
       refreshProfile
     }}>

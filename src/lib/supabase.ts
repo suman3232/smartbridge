@@ -74,3 +74,15 @@ export type Notification = {
   link: string | null;
   created_at: string;
 };
+
+export type OpenDeal = Omit<Deal, "delivery_address" | "admin_notes">;
+
+export type WithdrawalRequest = {
+  id: string;
+  user_id: string;
+  amount: number;
+  status: "pending" | "completed" | "rejected";
+  admin_notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
