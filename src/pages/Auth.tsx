@@ -5,6 +5,7 @@ import { AuthUI } from "@/components/ui/auth-fuse";
 import { useToast } from "@/hooks/use-toast";
 import { ArrowLeft } from "lucide-react";
 import { formatAuthError } from "@/lib/auth-errors";
+import { OAUTH_REDIRECT_KEY } from "@/lib/app-url";
 import { supabase } from "@/lib/supabase";
 import type { AuthError } from "@supabase/supabase-js";
 
@@ -41,24 +42,33 @@ export default function Auth() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
-    const authError = params.get("error_description") ?? hashParams.get("error_description");
+    const authError =
+      params.get("error_description") ??
+      hashParams.get("error_description");
+    const errorCode = params.get("error_code") ?? hashParams.get("error_code");
 
-    if (authError) {
-      const decoded = decodeURIComponent(authError.replace(/\+/g, " "));
+    if (authError || errorCode) {
+      const decoded = decodeURIComponent((authError ?? errorCode ?? "").replace(/\+/g, " "));
       toast({
         title: "Sign In Failed",
         description: formatAuthError({
           message: decoded,
-          code: decoded.toLowerCase().includes("provider") ? "validation_failed" : undefined,
+          code: errorCode ?? (decoded.toLowerCase().includes("provider") ? "validation_failed" : undefined),
         } as AuthError),
         variant: "destructive",
       });
-      window.history.replaceState({}, "", window.location.pathname + window.location.search);
+      window.history.replaceState({}, "", "/auth");
     }
   }, [toast]);
 
   useEffect(() => {
     if (!authLoading && user) {
+      const stored = sessionStorage.getItem(OAUTH_REDIRECT_KEY);
+      if (stored) {
+        sessionStorage.removeItem(OAUTH_REDIRECT_KEY);
+        navigate(stored, { replace: true });
+        return;
+      }
       navigate(redirectTo, { replace: true });
     }
   }, [user, authLoading, navigate, redirectTo]);
@@ -175,7 +185,7 @@ export default function Auth() {
   const handleGoogleSignIn = async () => {
     setLoading(true);
     try {
-      const { error } = await signInWithGoogle();
+      const { error } = await signInWithGoogle(redirectTo);
       if (error) {
         toast({
           title: "Google Sign In Failed",

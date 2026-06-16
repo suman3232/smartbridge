@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { CinematicHero } from "@/components/ui/cinematic-landing-hero";
+import { PageLoader } from "@/components/layout/PageLoader";
 import { Navbar } from "@/components/layout/Navbar";
 import { useLandingScrollAnimations } from "@/hooks/use-landing-scroll-animations";
 import { supabase } from "@/lib/supabase";
@@ -16,6 +16,10 @@ import {
   Store,
   UserCheck,
 } from "lucide-react";
+
+const CinematicHero = lazy(() =>
+  import("@/components/ui/cinematic-landing-hero").then((m) => ({ default: m.CinematicHero })),
+);
 
 const shopperSteps = [
   "Request a product and the card offer you need (or browse curated deals).",
@@ -70,9 +74,11 @@ export default function Landing() {
   return (
     <div ref={pageRef} className="overflow-x-hidden w-full min-h-screen bg-background">
       <Navbar />
-      <CinematicHero openDealsCount={openDealsCount} />
+      <Suspense fallback={<PageLoader className="min-h-[80vh]" />}>
+        <CinematicHero openDealsCount={openDealsCount} />
+      </Suspense>
 
-      <section id="features" className="py-20 lg:py-28 border-t border-white/[0.05] scroll-mt-28">
+      <section id="features" className="content-section py-20 lg:py-28 border-t border-white/[0.05] scroll-mt-28">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="max-w-2xl mb-14">
             <h2 className="landing-reveal-heading font-display text-3xl sm:text-4xl font-bold tracking-tight mb-4">
@@ -127,7 +133,7 @@ export default function Landing() {
         </div>
       </section>
 
-      <section id="how-it-works" className="py-20 lg:py-28 bg-secondary/30 border-y border-white/[0.05] scroll-mt-28">
+      <section id="how-it-works" className="content-section py-20 lg:py-28 bg-secondary/30 border-y border-white/[0.05] scroll-mt-28">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
           <h2 className="landing-reveal-heading font-display text-3xl sm:text-4xl font-bold tracking-tight mb-12">
             How pricing works
@@ -154,7 +160,7 @@ export default function Landing() {
         </div>
       </section>
 
-      <section className="py-20 lg:py-28">
+      <section className="content-section py-20 lg:py-28">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="landing-reveal-cta landing-card rounded-3xl border border-white/[0.08] bg-card/30 p-10 sm:p-14 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-8">
             <div className="max-w-xl">

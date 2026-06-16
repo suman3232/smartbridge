@@ -1,6 +1,8 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
 import { User, Session, AuthError } from "@supabase/supabase-js";
+import { getAuthRedirectUrl, OAUTH_REDIRECT_KEY } from "@/lib/app-url";
 import { supabase, Profile } from "@/lib/supabase";
+
 
 export type AuthResult = {
   error: AuthError | null;
@@ -16,7 +18,7 @@ type AuthContextType = {
   loading: boolean;
   signUp: (email: string, password: string, fullName: string, preferredRole: string) => Promise<AuthResult>;
   signIn: (email: string, password: string) => Promise<AuthResult>;
-  signInWithGoogle: () => Promise<{ error: AuthError | null }>;
+  signInWithGoogle: (postLoginPath?: string) => Promise<{ error: AuthError | null }>;
   signOut: () => Promise<void>;
   refreshProfile: () => Promise<void>;
 };
@@ -43,13 +45,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const checkAdminRole = async (userId: string) => {
-    const { data } = await supabase
-      .from("user_roles")
-      .select("role")
-      .eq("user_id", userId)
-      .eq("role", "admin")
-      .maybeSingle();
-    
+    const { data, error } = await supabase.rpc("is_admin", { _user_id: userId });
+
+    if (error) {
+      // Fallback if RPC missing (migration not applied yet)
+      const { data: roleRow } = await supabase
+        .from("user_roles")
+        .select("role")
+        .eq("user_id", userId)
+        .eq("role", "admin")
+        .maybeSingle();
+
+      setIsAdmin(!!roleRow);
+      return;
+    }
+
     setIsAdmin(!!data);
   };
 
@@ -57,31 +67,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await Promise.all([fetchProfile(userId), checkAdminRole(userId)]);
   };
 
+  const applySession = async (nextSession: Session | null) => {
+    setSession(nextSession);
+    setUser(nextSession?.user ?? null);
+
+    if (nextSession?.user) {
+      await loadUserData(nextSession.user.id);
+    } else {
+      setProfile(null);
+      setIsAdmin(false);
+    }
+
+    setLoading(false);
+  };
+
   useEffect(() => {
     let mounted = true;
 
-    const finishAuth = async (nextSession: Session | null) => {
-      if (!mounted) return;
-
-      setSession(nextSession);
-      setUser(nextSession?.user ?? null);
-
-      if (nextSession?.user) {
-        await loadUserData(nextSession.user.id);
-      } else {
-        setProfile(null);
-        setIsAdmin(false);
-      }
-
-      if (mounted) setLoading(false);
-    };
-
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      void finishAuth(nextSession);
+      // Defer Supabase calls — avoids missed profile/admin loads after OAuth (Supabase recommendation)
+      setTimeout(() => {
+        if (mounted) void applySession(nextSession);
+      }, 0);
     });
 
     supabase.auth.getSession().then(({ data: { session: nextSession } }) => {
-      void finishAuth(nextSession);
+      if (mounted) void applySession(nextSession);
     });
 
     return () => {
@@ -91,7 +102,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const signUp = async (email: string, password: string, fullName: string, preferredRole: string): Promise<AuthResult> => {
-    const redirectUrl = `${window.location.origin}/auth`;
+    const redirectUrl = getAuthRedirectUrl();
 
     const { data, error } = await supabase.auth.signUp({
       email,
@@ -125,11 +136,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   };
 
-  const signInWithGoogle = async () => {
+  const signInWithGoogle = async (postLoginPath = "/dashboard") => {
+    sessionStorage.setItem(OAUTH_REDIRECT_KEY, postLoginPath);
+
     const { data, error } = await supabase.auth.signInWithOAuth({
       provider: "google",
       options: {
-        redirectTo: `${window.location.origin}/auth`,
+        redirectTo: getAuthRedirectUrl(),
+        queryParams: {
+          access_type: "offline",
+          prompt: "consent",
+        },
       },
     });
 

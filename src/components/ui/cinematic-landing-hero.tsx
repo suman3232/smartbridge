@@ -179,6 +179,11 @@ export function CinematicHero({
   const requestRef = useRef<number>(0);
 
   useEffect(() => {
+    const finePointer = window.matchMedia("(pointer: fine)").matches;
+    if (!finePointer || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      return;
+    }
+
     const handleMouseMove = (e: MouseEvent) => {
       if (!mockupRef.current) return;
 

@@ -359,6 +359,19 @@ const authSplineCopy = {
 
 function AuthSplinePanel({ isSignIn }: { isSignIn: boolean }) {
   const copy = isSignIn ? authSplineCopy.signin : authSplineCopy.signup;
+  const [mountScene, setMountScene] = useState(false);
+
+  useEffect(() => {
+    const finePointer = window.matchMedia("(pointer: fine)").matches;
+    if (!finePointer) return;
+
+    const idle = window.requestIdleCallback(
+      () => setMountScene(true),
+      { timeout: 2500 },
+    );
+
+    return () => window.cancelIdleCallback(idle);
+  }, []);
 
   return (
     <div className="pointer-events-none relative h-[min(680px,calc(100vh-4rem))] w-full overflow-hidden bg-background">
@@ -366,7 +379,11 @@ function AuthSplinePanel({ isSignIn }: { isSignIn: boolean }) {
 
       <div className="auth-spline-canvas pointer-events-none absolute inset-0 z-0 flex items-center justify-center bg-background p-4">
         <div className="pointer-events-none h-full w-full origin-[center_55%] scale-[0.78] lg:scale-[0.82] xl:scale-[0.88]">
-          <SplineScene scene={SPLINE_SCENE} className="pointer-events-none h-full w-full bg-background" />
+          {mountScene ? (
+            <SplineScene scene={SPLINE_SCENE} className="pointer-events-none h-full w-full bg-background" />
+          ) : (
+            <div className="h-full w-full bg-background" aria-hidden="true" />
+          )}
         </div>
       </div>
 

@@ -1,3 +1,4 @@
+import { lazy, Suspense } from "react";
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -5,19 +6,28 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import { AuthProvider } from "@/contexts/AuthContext";
 import { ProtectedRoute } from "@/components/auth/ProtectedRoute";
-import Landing from "./pages/Landing";
-import Auth from "./pages/Auth";
-import Dashboard from "./pages/Dashboard";
-import CreateDeal from "./pages/CreateDeal";
-import BrowseDeals from "./pages/BrowseDeals";
-import DealDetail from "./pages/DealDetail";
-import AdminPanel from "./pages/AdminPanel";
-import Wallet from "./pages/Wallet";
-import Notifications from "./pages/Notifications";
-import KYCPage from "./pages/KYC";
-import NotFound from "./pages/NotFound";
+import { PageLoader } from "@/components/layout/PageLoader";
 
-const queryClient = new QueryClient();
+const LandingWithOAuthRedirect = lazy(() => import("./pages/LandingWithOAuthRedirect"));
+const Auth = lazy(() => import("./pages/Auth"));
+const Dashboard = lazy(() => import("./pages/Dashboard"));
+const CreateDeal = lazy(() => import("./pages/CreateDeal"));
+const BrowseDeals = lazy(() => import("./pages/BrowseDeals"));
+const DealDetail = lazy(() => import("./pages/DealDetail"));
+const AdminPanel = lazy(() => import("./pages/AdminPanel"));
+const Wallet = lazy(() => import("./pages/Wallet"));
+const Notifications = lazy(() => import("./pages/Notifications"));
+const KYCPage = lazy(() => import("./pages/KYC"));
+const NotFound = lazy(() => import("./pages/NotFound"));
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 60_000,
+      refetchOnWindowFocus: false,
+    },
+  },
+});
 
 const App = () => (
   <QueryClientProvider client={queryClient}>
@@ -26,20 +36,21 @@ const App = () => (
         <Toaster />
         <Sonner />
         <BrowserRouter>
-          <Routes>
-            <Route path="/" element={<Landing />} />
-            <Route path="/auth" element={<Auth />} />
-            <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
-            <Route path="/create-deal" element={<ProtectedRoute><CreateDeal /></ProtectedRoute>} />
-            <Route path="/deals" element={<BrowseDeals />} />
-            <Route path="/deals/:id" element={<ProtectedRoute><DealDetail /></ProtectedRoute>} />
-            <Route path="/admin" element={<ProtectedRoute><AdminPanel /></ProtectedRoute>} />
-            <Route path="/wallet" element={<ProtectedRoute><Wallet /></ProtectedRoute>} />
-            <Route path="/notifications" element={<ProtectedRoute><Notifications /></ProtectedRoute>} />
-            <Route path="/kyc" element={<ProtectedRoute><KYCPage /></ProtectedRoute>} />
-            {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
-            <Route path="*" element={<NotFound />} />
-          </Routes>
+          <Suspense fallback={<PageLoader fullScreen />}>
+            <Routes>
+              <Route path="/" element={<LandingWithOAuthRedirect />} />
+              <Route path="/auth" element={<Auth />} />
+              <Route path="/dashboard" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
+              <Route path="/create-deal" element={<ProtectedRoute><CreateDeal /></ProtectedRoute>} />
+              <Route path="/deals" element={<BrowseDeals />} />
+              <Route path="/deals/:id" element={<ProtectedRoute><DealDetail /></ProtectedRoute>} />
+              <Route path="/admin" element={<ProtectedRoute><AdminPanel /></ProtectedRoute>} />
+              <Route path="/wallet" element={<ProtectedRoute><Wallet /></ProtectedRoute>} />
+              <Route path="/notifications" element={<ProtectedRoute><Notifications /></ProtectedRoute>} />
+              <Route path="/kyc" element={<ProtectedRoute><KYCPage /></ProtectedRoute>} />
+              <Route path="*" element={<NotFound />} />
+            </Routes>
+          </Suspense>
         </BrowserRouter>
       </TooltipProvider>
     </AuthProvider>

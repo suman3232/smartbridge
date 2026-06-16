@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { DashboardLayout } from "@/components/layout/DashboardLayout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -15,11 +15,13 @@ import {
   XCircle,
   ExternalLink,
   CreditCard,
-  IndianRupee,
   Loader2,
   Package,
   FileCheck,
   Banknote,
+  UserPlus,
+  Users,
+  AlertCircle,
 } from "lucide-react";
 import { 
   AlertDialog,
@@ -32,15 +34,26 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+
+type AdminUser = {
+  user_id: string;
+  email: string;
+  full_name: string;
+  granted_at: string;
+};
 
 export default function AdminPanel() {
-  const { isAdmin, loading: authLoading } = useAuth();
+  const { isAdmin, profile, loading: authLoading } = useAuth();
   const navigate = useNavigate();
   const { toast } = useToast();
   
   const [deals, setDeals] = useState<Deal[]>([]);
   const [kycs, setKycs] = useState<KYC[]>([]);
   const [withdrawals, setWithdrawals] = useState<WithdrawalRequest[]>([]);
+  const [admins, setAdmins] = useState<AdminUser[]>([]);
+  const [grantEmail, setGrantEmail] = useState("");
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [rejectDialog, setRejectDialog] = useState<{ open: boolean; dealId: string | null; notes: string }>({
@@ -63,10 +76,11 @@ export default function AdminPanel() {
 
   const fetchAll = async () => {
     setLoading(true);
-    const [dealsRes, kycRes, withdrawalsRes] = await Promise.all([
+    const [dealsRes, kycRes, withdrawalsRes, adminsRes] = await Promise.all([
       supabase.from("deals").select("*").order("created_at", { ascending: false }),
       supabase.from("kycs").select("*").order("created_at", { ascending: false }),
       supabase.from("withdrawal_requests").select("*").order("created_at", { ascending: false }),
+      supabase.rpc("list_admins"),
     ]);
 
     if (dealsRes.error) {
@@ -76,7 +90,38 @@ export default function AdminPanel() {
     }
 
     if (kycRes.data) setKycs(kycRes.data as KYC[]);
-    if (withdrawalsRes.data) setWithdrawals(withdrawalsRes.data as WithdrawalRequest[]);
+
+    if (withdrawalsRes.error && !withdrawalsRes.error.message.includes("does not exist")) {
+      toast({ title: "Withdrawals", description: withdrawalsRes.error.message, variant: "destructive" });
+    } else if (withdrawalsRes.data) {
+      setWithdrawals(withdrawalsRes.data as WithdrawalRequest[]);
+    }
+
+    if (adminsRes.error) {
+      // list_admins RPC optional until admin migration is applied — load admins via join fallback
+      const { data: roleRows } = await supabase.from("user_roles").select("user_id, created_at").eq("role", "admin");
+      if (roleRows?.length) {
+        const { data: profiles } = await supabase
+          .from("profiles")
+          .select("id, email, full_name")
+          .in("id", roleRows.map((r) => r.user_id));
+        if (profiles) {
+          setAdmins(
+            roleRows.map((r) => {
+              const p = profiles.find((profile) => profile.id === r.user_id);
+              return {
+                user_id: r.user_id,
+                email: p?.email ?? "",
+                full_name: p?.full_name ?? "",
+                granted_at: r.created_at ?? new Date().toISOString(),
+              };
+            }),
+          );
+        }
+      }
+    } else if (adminsRes.data) {
+      setAdmins(adminsRes.data as AdminUser[]);
+    }
     setLoading(false);
   };
 
@@ -172,6 +217,40 @@ export default function AdminPanel() {
     }
   };
 
+  const handleGrantAdmin = async (e: FormEvent) => {
+    e.preventDefault();
+    const email = grantEmail.trim();
+    if (!email) return;
+
+    setActionLoading(`grant-${email}`);
+    const { error } = await supabase.rpc("grant_admin_role", { p_email: email });
+    setActionLoading(null);
+
+    if (error) {
+      toast({ title: "Could not grant admin", description: error.message, variant: "destructive" });
+    } else {
+      toast({
+        title: "Admin granted",
+        description: `${email} must sign out and sign in again to see the Admin Panel.`,
+      });
+      setGrantEmail("");
+      void fetchAll();
+    }
+  };
+
+  const handleRevokeAdmin = async (userId: string) => {
+    setActionLoading(`revoke-${userId}`);
+    const { error } = await supabase.rpc("revoke_admin_role", { p_user_id: userId });
+    setActionLoading(null);
+
+    if (error) {
+      toast({ title: "Could not revoke admin", description: error.message, variant: "destructive" });
+    } else {
+      toast({ title: "Admin removed", description: "User no longer has admin access." });
+      void fetchAll();
+    }
+  };
+
   const pendingDeals = deals.filter((d) => d.status === "pending");
   const pendingKycs = kycs.filter((k) => k.status === "pending");
   const pendingWithdrawals = withdrawals.filter((w) => w.status === "pending");
@@ -190,7 +269,7 @@ export default function AdminPanel() {
     }
   };
 
-  if (authLoading) {
+  if (authLoading || (!isAdmin && loading)) {
     return (
       <DashboardLayout>
         <div className="flex items-center justify-center h-64">
@@ -200,7 +279,16 @@ export default function AdminPanel() {
     );
   }
 
-  if (!isAdmin) return null;
+  if (!isAdmin) {
+    return (
+      <DashboardLayout>
+        <div className="flex flex-col items-center justify-center h-64 gap-2 text-muted-foreground">
+          <Shield className="w-10 h-10" />
+          <p>Admin access required</p>
+        </div>
+      </DashboardLayout>
+    );
+  }
 
   const DealCard = ({ deal }: { deal: Deal }) => (
     <Card className="hover:shadow-md transition-shadow">
@@ -376,6 +464,10 @@ export default function AdminPanel() {
               <Banknote className="w-4 h-4" />
               Payouts ({pendingWithdrawals.length})
             </TabsTrigger>
+            <TabsTrigger value="admins" className="gap-2">
+              <Users className="w-4 h-4" />
+              Admins ({admins.length})
+            </TabsTrigger>
           </TabsList>
 
           <TabsContent value="pending" className="space-y-4">
@@ -478,6 +570,75 @@ export default function AdminPanel() {
                 ))}
               </div>
             )}
+          </TabsContent>
+
+          <TabsContent value="admins" className="space-y-4">
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <UserPlus className="w-5 h-5" />
+                  Add admin
+                </CardTitle>
+                <CardDescription>
+                  User must already have signed up. They need to sign out and back in after you grant access.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <form onSubmit={handleGrantAdmin} className="flex flex-col sm:flex-row gap-3">
+                  <div className="flex-1 space-y-1">
+                    <Label htmlFor="admin-email">User email</Label>
+                    <Input
+                      id="admin-email"
+                      type="email"
+                      placeholder="user@example.com"
+                      value={grantEmail}
+                      onChange={(e) => setGrantEmail(e.target.value)}
+                      required
+                    />
+                  </div>
+                  <Button
+                    type="submit"
+                    className="sm:self-end"
+                    disabled={actionLoading === `grant-${grantEmail.trim()}`}
+                  >
+                    {actionLoading === `grant-${grantEmail.trim()}` ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      "Grant admin"
+                    )}
+                  </Button>
+                </form>
+              </CardContent>
+            </Card>
+
+            <div className="grid md:grid-cols-2 gap-4">
+              {admins.map((admin) => (
+                <Card key={admin.user_id}>
+                  <CardContent className="p-4 flex items-start justify-between gap-3">
+                    <div>
+                      <p className="font-medium">{admin.full_name || "—"}</p>
+                      <p className="text-sm text-muted-foreground">{admin.email}</p>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Since {new Date(admin.granted_at).toLocaleDateString()}
+                      </p>
+                      {admin.user_id === profile?.id && (
+                        <Badge variant="secondary" className="mt-2">You</Badge>
+                      )}
+                    </div>
+                    {admin.user_id !== profile?.id && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => handleRevokeAdmin(admin.user_id)}
+                        disabled={actionLoading === `revoke-${admin.user_id}`}
+                      >
+                        Remove
+                      </Button>
+                    )}
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
           </TabsContent>
         </Tabs>
       </div>

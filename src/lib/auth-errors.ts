@@ -24,7 +24,12 @@ export function formatAuthError(error: AuthError | null): string {
       return "An account with this email already exists. Try signing in.";
     case "signup_disabled":
       return "Sign-ups are disabled on this project.";
+    case "bad_oauth_state":
+      return "Google sign-in redirect mismatch. Open the app at http://localhost:8080 (not :3000), then in Supabase → Authentication → URL Configuration set Site URL to http://localhost:8080 and add http://localhost:8080/** to Redirect URLs.";
     default:
+      if (message.toLowerCase().includes("oauth state")) {
+        return "Google sign-in session expired or redirect URL is wrong. Use http://localhost:8080, update Supabase Site URL to match, and try again in a fresh tab.";
+      }
       return message || "Something went wrong. Please try again.";
   }
 }

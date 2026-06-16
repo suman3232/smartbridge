@@ -701,6 +701,23 @@ export type Database = {
         Args: { p_request_id: string }
         Returns: Database["public"]["Tables"]["withdrawal_requests"]["Row"]
       }
+      grant_admin_role: {
+        Args: { p_email: string }
+        Returns: Database["public"]["Tables"]["user_roles"]["Row"]
+      }
+      revoke_admin_role: {
+        Args: { p_user_id: string }
+        Returns: undefined
+      }
+      list_admins: {
+        Args: Record<string, never>
+        Returns: {
+          user_id: string
+          email: string
+          full_name: string
+          granted_at: string
+        }[]
+      }
       get_next_admin_number: { Args: never; Returns: string }
       has_role: {
         Args: {

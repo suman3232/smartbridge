@@ -28,10 +28,9 @@ export function useLandingScrollAnimations(rootRef: RefObject<HTMLElement | null
           gsap.from(el, {
             immediateRender: false,
             autoAlpha: 0,
-            y: 32,
-            filter: "blur(8px)",
-            duration: 0.85,
-            ease: "power3.out",
+            y: 28,
+            duration: 0.65,
+            ease: "power2.out",
             scrollTrigger: {
               trigger: el,
               start: "top 88%",
@@ -44,11 +43,10 @@ export function useLandingScrollAnimations(rootRef: RefObject<HTMLElement | null
           gsap.from(el, {
             immediateRender: false,
             autoAlpha: 0,
-            y: 18,
-            filter: "blur(5px)",
-            duration: 0.75,
-            ease: "power3.out",
-            delay: 0.08,
+            y: 16,
+            duration: 0.55,
+            ease: "power2.out",
+            delay: 0.06,
             scrollTrigger: {
               trigger: el,
               start: "top 88%",
@@ -62,12 +60,10 @@ export function useLandingScrollAnimations(rootRef: RefObject<HTMLElement | null
           gsap.from(cards, {
             immediateRender: false,
             autoAlpha: 0,
-            y: 48,
-            scale: 0.95,
-            filter: "blur(10px)",
-            duration: 0.85,
-            ease: "power3.out",
-            stagger: 0.12,
+            y: 32,
+            duration: 0.6,
+            ease: "power2.out",
+            stagger: 0.1,
             scrollTrigger: {
               trigger: cards[0]?.closest(".landing-reveal-grid") ?? cards[0],
               start: "top 85%",
@@ -82,11 +78,11 @@ export function useLandingScrollAnimations(rootRef: RefObject<HTMLElement | null
             gsap.from(steps, {
               immediateRender: false,
               autoAlpha: 0,
-              y: 10,
-              duration: 0.4,
-              stagger: 0.06,
+              y: 8,
+              duration: 0.35,
+              stagger: 0.05,
               ease: "power2.out",
-              delay: 0.2,
+              delay: 0.15,
               scrollTrigger: {
                 trigger: card,
                 start: "top 80%",
@@ -101,12 +97,10 @@ export function useLandingScrollAnimations(rootRef: RefObject<HTMLElement | null
           gsap.from(pricingCards, {
             immediateRender: false,
             autoAlpha: 0,
-            y: 36,
-            scale: 0.96,
-            filter: "blur(8px)",
-            duration: 0.7,
-            ease: "power3.out",
-            stagger: 0.09,
+            y: 24,
+            duration: 0.55,
+            ease: "power2.out",
+            stagger: 0.08,
             scrollTrigger: {
               trigger: pricingCards[0]?.parentElement ?? pricingCards[0],
               start: "top 85%",
@@ -119,10 +113,9 @@ export function useLandingScrollAnimations(rootRef: RefObject<HTMLElement | null
           gsap.from(el, {
             immediateRender: false,
             autoAlpha: 0,
-            scale: 0.92,
-            filter: "blur(10px)",
-            duration: 0.9,
-            ease: "expo.out",
+            y: 20,
+            duration: 0.65,
+            ease: "power2.out",
             scrollTrigger: {
               trigger: el,
               start: "top 86%",
@@ -135,8 +128,8 @@ export function useLandingScrollAnimations(rootRef: RefObject<HTMLElement | null
           gsap.from(el, {
             immediateRender: false,
             autoAlpha: 0,
-            y: 12,
-            duration: 0.55,
+            y: 10,
+            duration: 0.45,
             ease: "power2.out",
             scrollTrigger: {
               trigger: el,
@@ -150,7 +143,7 @@ export function useLandingScrollAnimations(rootRef: RefObject<HTMLElement | null
       }, root);
     };
 
-    const timer = window.setTimeout(setup, 400);
+    const timer = window.setTimeout(setup, 150);
     window.addEventListener("landing-hero-ready", refreshLandingTriggers);
     window.addEventListener("load", refreshLandingTriggers);
 
