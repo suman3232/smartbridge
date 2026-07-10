@@ -95,6 +95,11 @@ export function Navbar() {
 
             <div className="hidden md:flex items-center gap-1.5 shrink-0">
               <InstallButton variant="ghost" className="text-muted-foreground" />
+              <Link to="/support">
+                <Button variant="ghost" size="sm" className="rounded-full text-muted-foreground hover:text-foreground hover:bg-white/[0.05]">
+                  Support
+                </Button>
+              </Link>
               {user ? (
                 <>
                   <Link to="/dashboard">
@@ -151,6 +156,13 @@ export function Navbar() {
           <div className="absolute top-[4.5rem] left-3 right-3 nav-glass-scrolled rounded-2xl p-4 animate-fade-in">
             <div className="space-y-1">
               <InstallButton variant="outline" size="default" full className="mb-2 w-full justify-center" />
+              <Link
+                to="/support"
+                onClick={() => setMobileMenuOpen(false)}
+                className="block px-4 py-3 text-sm font-medium text-muted-foreground hover:text-foreground rounded-xl hover:bg-white/[0.05] transition-colors"
+              >
+                Support
+              </Link>
               {isLanding && !user &&
                 LANDING_LINKS.map((link) =>
                   link.href.startsWith("#") ? (

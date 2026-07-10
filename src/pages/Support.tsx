@@ -1,7 +1,9 @@
 import { DashboardLayout } from "@/components/layout/DashboardLayout";
+import { Navbar } from "@/components/layout/Navbar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/ui/page-header";
 import { WhatsAppButton } from "@/components/ui/whatsapp-button";
+import { useAuth } from "@/contexts/AuthContext";
 import { useSupportWhatsApp } from "@/lib/settings";
 import { LifeBuoy, MessageCircle, ShieldCheck, Clock } from "lucide-react";
 
@@ -26,9 +28,9 @@ const faqs = [
 
 export default function Support() {
   const supportNumber = useSupportWhatsApp();
+  const { user } = useAuth();
 
-  return (
-    <DashboardLayout>
+  const content = (
       <div className="space-y-6">
         <PageHeader
           eyebrow="Help & support"
@@ -97,6 +99,18 @@ export default function Support() {
           </CardContent>
         </Card>
       </div>
-    </DashboardLayout>
+  );
+
+  // Logged-in users get the app shell; visitors get the public navbar so the
+  // Support page is reachable without an account.
+  if (user) {
+    return <DashboardLayout>{content}</DashboardLayout>;
+  }
+
+  return (
+    <div className="min-h-screen bg-background">
+      <Navbar />
+      <main className="mx-auto max-w-3xl px-4 pb-16 pt-28 sm:px-6">{content}</main>
+    </div>
   );
 }

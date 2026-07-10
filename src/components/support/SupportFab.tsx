@@ -13,8 +13,9 @@ export function SupportFab() {
   const supportNumber = useSupportWhatsApp();
   const location = useLocation();
 
-  // Don't cover the sign-in / sign-up form.
-  if (location.pathname.startsWith("/auth")) return null;
+  // Don't cover the sign-in / sign-up form, and don't duplicate the button that's
+  // already on the Support page itself.
+  if (location.pathname.startsWith("/auth") || location.pathname === "/support") return null;
   if (!supportNumber) return null;
 
   const href = whatsappLink(supportNumber, "Hi, I need help with OfferBridge.");
