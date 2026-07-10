@@ -3,6 +3,7 @@ import { User, Session, AuthError } from "@supabase/supabase-js";
 import { getAuthRedirectUrl, OAUTH_REDIRECT_KEY } from "@/lib/app-url";
 import { supabase, Profile } from "@/lib/supabase";
 import { applyPendingReferral } from "@/lib/referral";
+import { getPendingPhone, clearPendingPhone } from "@/lib/pending-phone";
 
 
 export type AuthResult = {
@@ -37,15 +38,34 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // paths (onAuthStateChange INITIAL_SESSION + getSession) don't double-fetch.
   const loadedUserId = useRef<string | null>(null);
 
-  const fetchProfile = async (userId: string) => {
+  const fetchProfile = async (userId: string): Promise<Profile | null> => {
     const { data, error } = await supabase
       .from("profiles")
       .select("*")
       .eq("id", userId)
       .maybeSingle();
-    
+
     if (!error && data) {
       setProfile(data as Profile);
+      return data as Profile;
+    }
+    return null;
+  };
+
+  // If the user entered a mobile number at signup but the profile doesn't have
+  // one yet (e.g. an older DB trigger didn't persist it), write it now. Runs
+  // once a session exists, so it also covers the post-OTP-verification case.
+  const backfillPhone = async (userId: string, current: Profile | null) => {
+    const pending = getPendingPhone();
+    if (!pending) return;
+    if (current?.phone?.trim()) {
+      clearPendingPhone();
+      return;
+    }
+    const { error } = await supabase.from("profiles").update({ phone: pending }).eq("id", userId);
+    if (!error) {
+      clearPendingPhone();
+      await fetchProfile(userId);
     }
   };
 
@@ -63,7 +83,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const loadUserData = async (userId: string) => {
-    await Promise.all([fetchProfile(userId), checkAdminRole(userId)]);
+    const [prof] = await Promise.all([fetchProfile(userId), checkAdminRole(userId)]);
+    await backfillPhone(userId, prof);
   };
 
   const applySession = async (nextSession: Session | null) => {

@@ -9,6 +9,7 @@ import { OAUTH_REDIRECT_KEY } from "@/lib/app-url";
 import { supabase } from "@/lib/supabase";
 import { EmailOtpVerification } from "@/components/auth/EmailOtpVerification";
 import { storePendingReferral, getPendingReferral } from "@/lib/referral";
+import { storePendingPhone } from "@/lib/pending-phone";
 import { isValidPhone } from "@/lib/validation";
 import { Gift } from "lucide-react";
 import type { AuthError } from "@supabase/supabase-js";
@@ -166,6 +167,10 @@ export default function Auth() {
       });
       return;
     }
+
+    // Remember the number so it lands on the profile even if the DB trigger
+    // doesn't persist it, and so it survives the email-OTP step.
+    storePendingPhone(phone.trim());
 
     setLoading(true);
     try {
