@@ -59,6 +59,18 @@ CREATE TABLE IF NOT EXISTS public.profiles (
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
 );
+-- Guarantee the core columns exist even on an older profiles table. CREATE TABLE
+-- IF NOT EXISTS above is a no-op if the table already exists, so any column added
+-- after the table was first created must be ensured explicitly here. Without this,
+-- functions like list_admins (LANGUAGE sql, validated at creation) fail with
+-- "column p.email does not exist" on databases created before these columns.
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS email TEXT;
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS phone TEXT;
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS avatar_url TEXT;
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS preferred_role public.user_preference DEFAULT 'both';
+-- Backfill email from auth for rows created before the email column existed.
+UPDATE public.profiles p SET email = u.email
+  FROM auth.users u WHERE u.id = p.id AND (p.email IS NULL OR p.email = '');
 -- Refer & Earn: each user gets a unique referral code (backfilled near the end).
 ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS referral_code TEXT;
 DO $$ BEGIN
