@@ -1,10 +1,11 @@
 import * as React from "react";
 import { useState, useId, useEffect } from "react";
-import { Eye, EyeOff, LogIn, Sparkles, CreditCard, Wallet, ShieldCheck } from "lucide-react";
+import { Eye, EyeOff, LogIn, Sparkles, CreditCard, Wallet, ShieldCheck, Gift } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
+import { getPendingReferral, storePendingReferral, clearPendingReferral, normalizeReferralCode } from "@/lib/referral";
 
 export interface PasswordInputProps extends React.InputHTMLAttributes<HTMLInputElement> {
   label?: string;
@@ -186,6 +187,12 @@ function SignUpForm({
   onToggle,
 }: SignUpFormProps) {
   const [preferredRole, setPreferredRole] = useState(defaultPreferredRole);
+  // Prefill from a stored code or a fresh ?ref= link (read synchronously so the
+  // field shows the code even before the parent effect stores it); also editable.
+  const [referral, setReferral] = useState(() => {
+    const fromUrl = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("ref") : null;
+    return normalizeReferralCode(getPendingReferral() || fromUrl || "");
+  });
 
   const handleSignUp = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -264,6 +271,30 @@ function SignUpForm({
               </button>
             ))}
           </div>
+        </div>
+        <div className="grid gap-1">
+          <Label htmlFor="signup-referral" className="flex items-center gap-1.5 text-xs">
+            <Gift className="size-3 text-primary" /> Referral code <span className="text-muted-foreground/70">(optional)</span>
+          </Label>
+          <Input
+            id="signup-referral"
+            name="referral"
+            type="text"
+            placeholder="Have a code? Enter it"
+            className="h-9 uppercase placeholder:normal-case"
+            value={referral}
+            onChange={(e) => {
+              const v = normalizeReferralCode(e.target.value);
+              setReferral(v);
+              if (v) storePendingReferral(v);
+              else clearPendingReferral();
+            }}
+            disabled={loading}
+            autoComplete="off"
+          />
+          {referral && (
+            <p className="text-[11px] text-success">You'll both earn once you complete your first deal.</p>
+          )}
         </div>
         <Button type="submit" variant="hero" className="h-9" disabled={loading}>
           {loading ? "Creating account…" : "Sign Up"}
@@ -362,12 +393,12 @@ const authHighlights = [
 
 function AuthCardVisual() {
   return (
-    <div className="relative mx-auto mb-10 h-40 w-full max-w-[320px]">
+    <div className="relative mx-auto mb-12 h-44 w-full max-w-[330px]">
       {/* Back card (depth) */}
-      <div className="absolute inset-x-8 top-3 h-32 rotate-[-9deg] rounded-2xl border border-white/[0.06] bg-card/70 animate-card-float-slow" />
+      <div className="absolute inset-x-8 top-4 h-32 rotate-[-9deg] rounded-2xl border border-white/[0.06] bg-card/70 animate-card-float-slow" />
       {/* Front card — OfferBridge branded */}
       <div
-        className="absolute inset-x-0 top-0 h-32 overflow-hidden rounded-2xl border border-white/10 p-5 text-primary-foreground shadow-xl animate-card-float"
+        className="absolute inset-x-0 top-0 h-36 overflow-hidden rounded-2xl border border-white/10 p-5 text-primary-foreground shadow-xl animate-card-float"
         style={{ backgroundImage: "var(--gradient-primary)" }}
       >
         <div className="pointer-events-none absolute -left-6 -top-14 h-24 w-40 rotate-12 bg-white/15 blur-2xl" />
@@ -376,15 +407,22 @@ function AuthCardVisual() {
             <span className="font-display text-sm font-bold tracking-tight">OfferBridge</span>
             <CreditCard className="h-5 w-5 opacity-85" />
           </div>
-          <div>
-            <div className="mb-2 h-6 w-9 rounded-md border border-white/20 bg-white/25" />
-            <p className="font-mono text-sm tracking-[0.28em]">•••• •••• •••• 4242</p>
+          <p className="font-mono text-sm tracking-[0.28em]">•••• •••• •••• 4242</p>
+          <div className="flex items-end justify-between">
+            <span className="text-[10px] uppercase tracking-wider opacity-80">Card holder</span>
+            <span className="text-[10px] uppercase tracking-wider opacity-80">Earn on every order</span>
           </div>
         </div>
       </div>
-      {/* Floating reward chip */}
-      <div className="absolute -right-1 -top-3 inline-flex items-center gap-1 rounded-full border border-success/30 bg-success/15 px-2.5 py-1 text-[11px] font-semibold text-success shadow-sm animate-card-float-slow">
-        <Wallet className="h-3 w-3" /> +commission
+      {/* Prominent commission badge — sits below the card, fully visible */}
+      <div className="absolute -bottom-6 right-3 flex items-center gap-2 rounded-xl border border-success/30 bg-success/15 px-3.5 py-2 shadow-lg backdrop-blur animate-card-float-slow">
+        <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-success/25 text-success">
+          <Wallet className="h-4 w-4" />
+        </div>
+        <div className="leading-tight">
+          <p className="text-sm font-bold text-success">+ Commission</p>
+          <p className="text-[10px] text-success/80">credited to your wallet</p>
+        </div>
       </div>
     </div>
   );

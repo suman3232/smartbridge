@@ -15,6 +15,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/lib/supabase";
 import { PriceChart } from "@/components/tracker/PriceChart";
+import { PriceGauge } from "@/components/tracker/PriceGauge";
 import {
   detectPlatform,
   fetchProductData,
@@ -38,30 +39,10 @@ import {
   Bell,
   BellOff,
   ExternalLink,
-  Sparkles,
 } from "lucide-react";
 
 const money = (v: number | null | undefined, currency = "INR") =>
   v == null ? "—" : `${currency === "INR" ? "₹" : ""}${Number(v).toLocaleString()}`;
-
-const toneClass: Record<string, string> = {
-  excellent: "bg-success/10 text-success border-success/20",
-  good: "bg-success/10 text-success border-success/20",
-  fair: "bg-secondary text-foreground border-border",
-  wait: "bg-warning/10 text-warning border-warning/20",
-  neutral: "bg-secondary text-muted-foreground border-border",
-};
-
-function RecommendationPill({ rec }: { rec: ProductStats["recommendation"] }) {
-  const d = RECOMMENDATION_DISPLAY[rec];
-  const Icon = rec === "excellent" || rec === "good" ? TrendingDown : rec === "wait" ? TrendingUp : Sparkles;
-  return (
-    <span className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium ${toneClass[d.tone]}`}>
-      <Icon className="h-3.5 w-3.5" />
-      {d.label}
-    </span>
-  );
-}
 
 export default function PriceTracker() {
   const { profile } = useAuth();
@@ -454,51 +435,91 @@ export default function PriceTracker() {
           {selected && (
             <>
               <DialogHeader>
-                <DialogTitle className="pr-6 leading-snug">{selected.product_name}</DialogTitle>
+                <DialogTitle className="sr-only">{selected.product_name}</DialogTitle>
               </DialogHeader>
 
               <div className="space-y-4">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <Badge variant="secondary" className="capitalize">{PLATFORM_LABELS[selected.platform] ?? selected.platform}</Badge>
-                  <a href={selected.url} target="_blank" rel="noopener noreferrer" className="text-xs text-primary hover:underline inline-flex items-center gap-1">
-                    <ExternalLink className="w-3 h-3" /> Open product
-                  </a>
+                {/* Product header */}
+                <div className="flex gap-3">
+                  <div className="h-20 w-20 shrink-0 overflow-hidden rounded-xl border border-border bg-secondary/50 flex items-center justify-center">
+                    {selected.image_url ? (
+                      <img src={selected.image_url} alt="" className="h-full w-full object-contain" loading="lazy" />
+                    ) : (
+                      <LineChart className="h-7 w-7 text-muted-foreground" />
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="line-clamp-2 text-sm font-semibold leading-snug">{selected.product_name}</p>
+                    <div className="mt-1 flex items-center gap-2">
+                      <Badge variant="secondary" className="capitalize">{PLATFORM_LABELS[selected.platform] ?? selected.platform}</Badge>
+                      <a href={selected.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs text-primary hover:underline">
+                        <ExternalLink className="h-3 w-3" /> Open
+                      </a>
+                    </div>
+                    <div className="mt-2 flex items-baseline gap-2">
+                      <span className="num text-2xl font-bold">{money(stats?.current_price ?? selected.current_price, selected.currency)}</span>
+                      {(() => {
+                        const cur = stats?.current_price ?? selected.current_price;
+                        const mrp = selected.original_price;
+                        if (mrp && cur && mrp > cur) {
+                          const off = Math.round(((mrp - cur) / mrp) * 100);
+                          return (
+                            <>
+                              <span className="num text-sm text-muted-foreground line-through">{money(mrp, selected.currency)}</span>
+                              <span className="rounded-md bg-success/15 px-1.5 py-0.5 text-xs font-semibold text-success">{off}% off</span>
+                            </>
+                          );
+                        }
+                        return null;
+                      })()}
+                    </div>
+                  </div>
                 </div>
 
                 {detailLoading ? (
                   <div className="flex justify-center py-10"><Loader2 className="w-6 h-6 animate-spin text-primary" /></div>
                 ) : (
                   <>
-                    {stats && <RecommendationPill rec={stats.recommendation} />}
+                    {/* Should you buy now? */}
+                    <div className="surface p-4">
+                      <p className="mb-1 text-sm font-semibold">Should you buy now?</p>
+                      {stats && stats.points >= 2 ? (
+                        <PriceGauge
+                          score={100 - Number(stats.pct_from_low)}
+                          tone={RECOMMENDATION_DISPLAY[stats.recommendation].tone}
+                          label={RECOMMENDATION_DISPLAY[stats.recommendation].label}
+                          subLabel={
+                            stats.recent_change !== 0
+                              ? `${stats.recent_change > 0 ? "▲" : "▼"} ${Math.abs(stats.recent_change)}% vs last check`
+                              : "Based on your recorded price history"
+                          }
+                        />
+                      ) : (
+                        <div className="py-4 text-center">
+                          <p className="text-sm font-medium text-muted-foreground">Building price history…</p>
+                          <p className="mt-1 text-xs text-muted-foreground">Record a few more prices (or enable auto-checks) to unlock a buy recommendation. No fake data is used.</p>
+                        </div>
+                      )}
+                    </div>
 
-                    <div className="grid grid-cols-3 gap-2 text-center">
-                      <div className="rounded-xl bg-secondary/50 p-2">
-                        <p className="text-[10px] uppercase text-muted-foreground">Current</p>
-                        <p className="font-semibold">{money(stats?.current_price ?? selected.current_price, selected.currency)}</p>
+                    {/* Price stats */}
+                    <div className="grid grid-cols-3 gap-2">
+                      <div className="rounded-xl border border-success/20 bg-success/[0.07] p-2.5 text-center">
+                        <p className="flex items-center justify-center gap-1 text-[10px] uppercase tracking-wider text-success"><TrendingDown className="h-3 w-3" /> Lowest</p>
+                        <p className="num mt-0.5 font-bold text-success">{money(stats?.lowest, selected.currency)}</p>
                       </div>
-                      <div className="rounded-xl bg-success/10 p-2">
-                        <p className="text-[10px] uppercase text-success">Lowest</p>
-                        <p className="font-semibold text-success">{money(stats?.lowest, selected.currency)}</p>
+                      <div className="rounded-xl border border-border bg-secondary/40 p-2.5 text-center">
+                        <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Average</p>
+                        <p className="num mt-0.5 font-bold">{money(stats?.average, selected.currency)}</p>
                       </div>
-                      <div className="rounded-xl bg-secondary/50 p-2">
-                        <p className="text-[10px] uppercase text-muted-foreground">Highest</p>
-                        <p className="font-semibold">{money(stats?.highest, selected.currency)}</p>
-                      </div>
-                      <div className="rounded-xl bg-secondary/50 p-2">
-                        <p className="text-[10px] uppercase text-muted-foreground">Average</p>
-                        <p className="font-semibold">{money(stats?.average, selected.currency)}</p>
-                      </div>
-                      <div className="rounded-xl bg-secondary/50 p-2">
-                        <p className="text-[10px] uppercase text-muted-foreground">Recent Δ</p>
-                        <p className={`font-semibold ${(stats?.recent_change ?? 0) > 0 ? "text-destructive" : (stats?.recent_change ?? 0) < 0 ? "text-success" : ""}`}>
-                          {stats && stats.recent_change != null ? `${stats.recent_change > 0 ? "+" : ""}${stats.recent_change}%` : "—"}
-                        </p>
-                      </div>
-                      <div className="rounded-xl bg-secondary/50 p-2">
-                        <p className="text-[10px] uppercase text-muted-foreground">Points</p>
-                        <p className="font-semibold">{stats?.points ?? history.length}</p>
+                      <div className="rounded-xl border border-destructive/20 bg-destructive/[0.06] p-2.5 text-center">
+                        <p className="flex items-center justify-center gap-1 text-[10px] uppercase tracking-wider text-destructive"><TrendingUp className="h-3 w-3" /> Highest</p>
+                        <p className="num mt-0.5 font-bold">{money(stats?.highest, selected.currency)}</p>
                       </div>
                     </div>
+                    <p className="text-center text-[11px] text-muted-foreground">
+                      Tracking {stats?.points ?? history.length} price point{(stats?.points ?? history.length) === 1 ? "" : "s"} since you added this product.
+                    </p>
 
                     <PriceChart history={history} currency={selected.currency} targetPrice={selected.target_price} />
 
