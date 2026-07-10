@@ -16,12 +16,12 @@ import {
   Gift,
   LifeBuoy,
   Menu,
-  X,
   LogOut
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Logo } from "@/components/brand/Logo";
 import { InstallButton } from "@/components/pwa/InstallButton";
+import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 
 const navItems = [
   { icon: LayoutDashboard, label: "Dashboard", href: "/dashboard" },
@@ -145,9 +145,17 @@ export function DashboardLayout({ children }: { children: ReactNode }) {
     <div className="min-h-screen bg-background">
       {/* Mobile header */}
       <header className="lg:hidden fixed top-0 left-0 right-0 z-50 h-16 bg-background/80 backdrop-blur-xl border-b border-border/50 flex items-center px-4">
-        <button onClick={() => setSidebarOpen(true)} className="p-2 -ml-2">
-          <Menu className="w-6 h-6" />
-        </button>
+        <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
+          <SheetTrigger asChild>
+            <button className="p-2 -ml-2 touch-manipulation" aria-label="Open menu">
+              <Menu className="w-6 h-6" />
+            </button>
+          </SheetTrigger>
+          <SheetContent side="left" className="flex w-72 flex-col border-r border-border bg-card p-0">
+            <SheetTitle className="sr-only">Menu</SheetTitle>
+            <SidebarContent />
+          </SheetContent>
+        </Sheet>
         <div className="flex-1 flex items-center justify-center">
           <Link to="/">
             <Logo size="sm" />
@@ -157,27 +165,6 @@ export function DashboardLayout({ children }: { children: ReactNode }) {
           <InstallButton variant="ghost" size="sm" className="px-2" />
         </div>
       </header>
-
-      {/* Mobile sidebar overlay */}
-      {sidebarOpen && (
-        <div
-          className="lg:hidden fixed inset-0 z-50 bg-foreground/20 backdrop-blur-sm"
-          onClick={() => setSidebarOpen(false)}
-        >
-          <div
-            className="w-72 h-full bg-card border-r border-border shadow-2xl flex flex-col animate-slide-in-right"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <button
-              onClick={() => setSidebarOpen(false)}
-              className="absolute top-4 right-4 p-2"
-            >
-              <X className="w-5 h-5" />
-            </button>
-            <SidebarContent />
-          </div>
-        </div>
-      )}
 
       {/* Desktop sidebar */}
       <aside className="hidden lg:flex fixed top-0 left-0 bottom-0 w-72 bg-sidebar-background/95 border-r border-border/60 flex-col z-40">

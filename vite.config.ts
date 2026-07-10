@@ -14,7 +14,9 @@ export default defineConfig(({ mode }) => ({
     react(),
     mode === "development" && componentTagger(),
     VitePWA({
-      registerType: "prompt", // we surface a "New version available" prompt, no silent reload
+      // autoUpdate: a new deploy activates and reloads automatically, so users are
+      // never stuck on a stale cached build (skipWaiting + clientsClaim below).
+      registerType: "autoUpdate",
       injectRegister: false, // registration handled by the useRegisterSW() hook
       includeAssets: ["favicon.svg", "favicon-32x32.png", "apple-touch-icon.png", "robots.txt"],
       manifest: {

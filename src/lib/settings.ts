@@ -7,6 +7,12 @@ import { supabase } from "@/lib/supabase";
 let cache: string | null | undefined; // undefined = not loaded yet, null = not set
 let inflight: Promise<string | null> | null = null;
 
+// Fallback used when the admin hasn't saved a number in the DB yet (or the
+// app_settings table isn't created). Set VITE_SUPPORT_WHATSAPP in your host
+// env (e.g. Vercel) to switch on the support button without any DB change.
+const ENV_FALLBACK: string | null =
+  ((import.meta.env.VITE_SUPPORT_WHATSAPP as string | undefined) ?? "").trim() || null;
+
 export async function getSupportWhatsApp(): Promise<string | null> {
   if (cache !== undefined) return cache;
   if (!inflight) {
@@ -16,12 +22,12 @@ export async function getSupportWhatsApp(): Promise<string | null> {
       .eq("id", true)
       .maybeSingle()
       .then(({ data }) => {
-        cache = data?.support_whatsapp ?? null;
+        cache = data?.support_whatsapp ?? ENV_FALLBACK;
         return cache;
       })
       .catch(() => {
-        cache = null;
-        return null;
+        cache = ENV_FALLBACK;
+        return cache;
       })
       .finally(() => {
         inflight = null;
