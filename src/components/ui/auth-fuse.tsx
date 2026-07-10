@@ -360,15 +360,45 @@ const authHighlights = [
   { icon: ShieldCheck, title: "Admin-verified payouts", desc: "KYC-verified withdrawals straight to your bank account." },
 ];
 
+function AuthCardVisual() {
+  return (
+    <div className="relative mx-auto mb-10 h-40 w-full max-w-[320px]">
+      {/* Back card (depth) */}
+      <div className="absolute inset-x-8 top-3 h-32 rotate-[-9deg] rounded-2xl border border-white/[0.06] bg-card/70 animate-card-float-slow" />
+      {/* Front card — OfferBridge branded */}
+      <div
+        className="absolute inset-x-0 top-0 h-32 overflow-hidden rounded-2xl border border-white/10 p-5 text-primary-foreground shadow-xl animate-card-float"
+        style={{ backgroundImage: "var(--gradient-primary)" }}
+      >
+        <div className="pointer-events-none absolute -left-6 -top-14 h-24 w-40 rotate-12 bg-white/15 blur-2xl" />
+        <div className="relative flex h-full flex-col justify-between">
+          <div className="flex items-center justify-between">
+            <span className="font-display text-sm font-bold tracking-tight">OfferBridge</span>
+            <CreditCard className="h-5 w-5 opacity-85" />
+          </div>
+          <div>
+            <div className="mb-2 h-6 w-9 rounded-md border border-white/20 bg-white/25" />
+            <p className="font-mono text-sm tracking-[0.28em]">•••• •••• •••• 4242</p>
+          </div>
+        </div>
+      </div>
+      {/* Floating reward chip */}
+      <div className="absolute -right-1 -top-3 inline-flex items-center gap-1 rounded-full border border-success/30 bg-success/15 px-2.5 py-1 text-[11px] font-semibold text-success shadow-sm animate-card-float-slow">
+        <Wallet className="h-3 w-3" /> +commission
+      </div>
+    </div>
+  );
+}
+
 function AuthSplinePanel({ isSignIn }: { isSignIn: boolean }) {
   const copy = isSignIn ? authSplineCopy.signin : authSplineCopy.signup;
 
   return (
     <div className="relative h-[min(680px,calc(100vh-4rem))] w-full overflow-hidden rounded-3xl border border-white/[0.06] bg-background">
-      {/* Lightweight branded backdrop (replaces the heavy 3D scene) */}
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_70%_20%,hsl(217_91%_60%/0.18),transparent_55%)]" />
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_20%_90%,hsl(217_91%_60%/0.10),transparent_50%)]" />
-      <div className="pointer-events-none absolute -right-16 top-1/3 h-72 w-72 rounded-full bg-primary/20 blur-3xl animate-float" />
+      {/* Animated branded backdrop (lightweight — no 3D library) */}
+      <div className="pointer-events-none absolute inset-0 animate-glow-pulse bg-[radial-gradient(ellipse_at_70%_15%,hsl(217_91%_60%/0.18),transparent_55%)]" />
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_15%_95%,hsl(199_89%_58%/0.10),transparent_50%)]" />
+      <div className="pointer-events-none absolute -right-20 top-1/4 h-64 w-64 rounded-full bg-primary/15 blur-2xl animate-float" />
       <div
         className="pointer-events-none absolute inset-0 opacity-[0.04]"
         style={{
@@ -379,6 +409,8 @@ function AuthSplinePanel({ isSignIn }: { isSignIn: boolean }) {
       />
 
       <div className="relative z-10 flex h-full flex-col justify-center p-8 lg:p-12">
+        <AuthCardVisual />
+
         <span className="mb-4 inline-flex w-fit items-center gap-1.5 rounded-full bg-primary/15 px-3 py-1 text-xs font-semibold uppercase tracking-wider text-primary">
           {isSignIn ? <LogIn className="size-3" /> : <Sparkles className="size-3" />}
           {copy.badge}
@@ -386,14 +418,18 @@ function AuthSplinePanel({ isSignIn }: { isSignIn: boolean }) {
         <h2 className="font-display text-3xl font-bold tracking-tight text-transparent bg-gradient-to-b from-foreground to-muted-foreground bg-clip-text lg:text-4xl">
           {copy.title}
         </h2>
-        <p className="mt-4 max-w-sm text-sm leading-relaxed text-muted-foreground lg:text-base">
+        <p className="mt-3 max-w-sm text-sm leading-relaxed text-muted-foreground lg:text-base">
           {copy.subtitle}
         </p>
 
-        <div className="mt-10 space-y-4">
-          {authHighlights.map((h) => (
-            <div key={h.title} className="flex items-start gap-3">
-              <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-white/[0.05] border border-white/[0.07]">
+        <div className="mt-8 space-y-3.5">
+          {authHighlights.map((h, i) => (
+            <div
+              key={h.title}
+              className="flex items-start gap-3 animate-fade-up"
+              style={{ animationDelay: `${140 + i * 90}ms` }}
+            >
+              <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-white/[0.07] bg-white/[0.05]">
                 <h.icon className="h-4 w-4 text-primary" />
               </div>
               <div>

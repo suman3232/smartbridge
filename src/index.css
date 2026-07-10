@@ -287,6 +287,23 @@
   to { opacity: 1; transform: translateY(0); }
 }
 
+/* Auth panel: gentle floating card + soft glow pulse (lightweight, no 3D lib) */
+@keyframes card-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-9px); }
+}
+@keyframes card-float-slow {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+@keyframes glow-pulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 0.8; }
+}
+.animate-card-float { animation: card-float 6s ease-in-out infinite; }
+.animate-card-float-slow { animation: card-float-slow 7.5s ease-in-out infinite; }
+.animate-glow-pulse { animation: glow-pulse 5s ease-in-out infinite; }
+
 /* Skeleton shimmer used across loading states */
 .skeleton {
   position: relative;
@@ -310,6 +327,9 @@
   .animate-scale-in,
   .page-enter,
   .animate-float,
+  .animate-card-float,
+  .animate-card-float-slow,
+  .animate-glow-pulse,
   .skeleton::after {
     animation: none !important;
     opacity: 1 !important;
