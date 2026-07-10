@@ -171,6 +171,7 @@ interface SignUpFormProps {
   onSubmit: (data: {
     fullName: string;
     email: string;
+    phone: string;
     password: string;
     preferredRole: string;
   }) => void | Promise<void>;
@@ -199,8 +200,9 @@ function SignUpForm({
     const form = event.currentTarget;
     const fullName = (form.elements.namedItem("name") as HTMLInputElement).value;
     const email = (form.elements.namedItem("email") as HTMLInputElement).value;
+    const phone = (form.elements.namedItem("phone") as HTMLInputElement).value;
     const password = (form.elements.namedItem("password") as HTMLInputElement).value;
-    await onSubmit({ fullName, email, password, preferredRole });
+    await onSubmit({ fullName, email, phone, password, preferredRole });
   };
 
   return (
@@ -238,6 +240,21 @@ function SignUpForm({
             autoComplete="email"
             disabled={loading}
           />
+        </div>
+        <div className="grid gap-1">
+          <Label htmlFor="signup-phone">Mobile number</Label>
+          <Input
+            id="signup-phone"
+            name="phone"
+            type="tel"
+            inputMode="tel"
+            placeholder="+91 98765 43210"
+            className="h-9"
+            required
+            autoComplete="tel"
+            disabled={loading}
+          />
+          <p className="text-[11px] text-muted-foreground">Needed so we can reach you about your deals.</p>
         </div>
         <PasswordInput
           id="signup-password"
@@ -320,6 +337,7 @@ interface AuthFormContainerProps {
   onSignUp: (data: {
     fullName: string;
     email: string;
+    phone: string;
     password: string;
     preferredRole: string;
   }) => void | Promise<void>;
@@ -366,6 +384,7 @@ export interface AuthUIProps {
   onSignUp: (data: {
     fullName: string;
     email: string;
+    phone: string;
     password: string;
     preferredRole: string;
   }) => void | Promise<void>;

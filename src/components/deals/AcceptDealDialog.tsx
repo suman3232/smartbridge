@@ -4,6 +4,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import { supabase, OpenDeal } from "@/lib/supabase";
+import { useAuth } from "@/contexts/AuthContext";
 import { Loader2, MapPin } from "lucide-react";
 
 type AcceptPreview = {
@@ -27,6 +28,7 @@ interface AcceptDealDialogProps {
 export function AcceptDealDialog({ deal, open, onOpenChange, onSuccess }: AcceptDealDialogProps) {
   const { toast } = useToast();
   const navigate = useNavigate();
+  const { profile } = useAuth();
   const [loading, setLoading] = useState(false);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [preview, setPreview] = useState<AcceptPreview | null>(null);
@@ -58,6 +60,17 @@ export function AcceptDealDialog({ deal, open, onOpenChange, onSuccess }: Accept
 
   const handleAccept = async () => {
     if (!preview) return;
+
+    if (!profile?.phone?.trim()) {
+      toast({
+        title: "Add your mobile number first",
+        description: "We need a contact number so the admin can reach you about this order.",
+        variant: "destructive",
+      });
+      onOpenChange(false);
+      navigate("/profile");
+      return;
+    }
 
     setLoading(true);
 

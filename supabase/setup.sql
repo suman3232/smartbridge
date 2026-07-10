@@ -647,11 +647,12 @@ $$;
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 BEGIN
-  INSERT INTO public.profiles (id, full_name, email, preferred_role, referral_code)
+  INSERT INTO public.profiles (id, full_name, email, phone, preferred_role, referral_code)
   VALUES (
     NEW.id,
     COALESCE(NEW.raw_user_meta_data ->> 'full_name', 'User'),
     NEW.email,
+    NULLIF(TRIM(COALESCE(NEW.raw_user_meta_data ->> 'phone', '')), ''),
     COALESCE((NEW.raw_user_meta_data ->> 'preferred_role')::public.user_preference, 'both'),
     public.generate_referral_code()
   )

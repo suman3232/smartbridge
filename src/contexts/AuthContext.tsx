@@ -18,7 +18,7 @@ type AuthContextType = {
   isAdmin: boolean;
   isVerified: boolean;
   loading: boolean;
-  signUp: (email: string, password: string, fullName: string, preferredRole: string) => Promise<AuthResult>;
+  signUp: (email: string, password: string, fullName: string, preferredRole: string, phone?: string) => Promise<AuthResult>;
   signIn: (email: string, password: string) => Promise<AuthResult>;
   signInWithGoogle: (postLoginPath?: string) => Promise<{ error: AuthError | null }>;
   signOut: () => Promise<void>;
@@ -114,7 +114,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  const signUp = async (email: string, password: string, fullName: string, preferredRole: string): Promise<AuthResult> => {
+  const signUp = async (email: string, password: string, fullName: string, preferredRole: string, phone?: string): Promise<AuthResult> => {
     const redirectUrl = getAuthRedirectUrl();
 
     const { data, error } = await supabase.auth.signUp({
@@ -125,6 +125,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         data: {
           full_name: fullName,
           preferred_role: preferredRole,
+          ...(phone?.trim() ? { phone: phone.trim() } : {}),
         },
       },
     });

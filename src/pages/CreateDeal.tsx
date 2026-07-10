@@ -55,6 +55,16 @@ export default function CreateDeal() {
       return;
     }
 
+    if (!profile.phone?.trim()) {
+      toast({
+        title: "Add your mobile number first",
+        description: "We need a contact number so the admin can reach you about this request.",
+        variant: "destructive",
+      });
+      navigate("/profile");
+      return;
+    }
+
     if (advanceAmount <= 0) {
       toast({ title: "Error", description: "Card offer price must be greater than 0", variant: "destructive" });
       return;

@@ -49,6 +49,12 @@ type AdminUser = {
   granted_at: string;
 };
 
+type DealContact = {
+  full_name: string | null;
+  email: string | null;
+  phone: string | null;
+};
+
 type AdminKyc = {
   id: string;
   user_id: string;
@@ -94,6 +100,7 @@ export default function AdminPanel() {
   const { toast } = useToast();
   
   const [deals, setDeals] = useState<Deal[]>([]);
+  const [dealContacts, setDealContacts] = useState<Record<string, DealContact>>({});
   const [kycs, setKycs] = useState<AdminKyc[]>([]);
   const [withdrawals, setWithdrawals] = useState<WithdrawalRequest[]>([]);
   const [admins, setAdmins] = useState<AdminUser[]>([]);
@@ -167,7 +174,27 @@ export default function AdminPanel() {
     if (dealsRes.error) {
       toast({ title: "Error", description: dealsRes.error.message, variant: "destructive" });
     } else if (dealsRes.data) {
-      setDeals(dealsRes.data as Deal[]);
+      const dealRows = dealsRes.data as Deal[];
+      setDeals(dealRows);
+
+      // Load the poster's + accepter's contact for each deal (admins can read all
+      // profiles) so the admin knows who to contact.
+      const ids = Array.from(
+        new Set(dealRows.flatMap((d) => [d.merchant_id, d.customer_id]).filter(Boolean) as string[]),
+      );
+      if (ids.length) {
+        const { data: profs } = await supabase
+          .from("profiles")
+          .select("id, full_name, email, phone")
+          .in("id", ids);
+        if (profs) {
+          const map: Record<string, DealContact> = {};
+          profs.forEach((p) => {
+            map[p.id] = { full_name: p.full_name, email: p.email, phone: p.phone };
+          });
+          setDealContacts(map);
+        }
+      }
     }
 
     if (kycRes.error) {
@@ -522,11 +549,32 @@ export default function AdminPanel() {
           </div>
         </div>
 
-        {deal.admin_contact_number && (
-          <div className="text-sm text-muted-foreground mb-3">
-            Admin Contact: <span className="font-medium">{deal.admin_contact_number}</span>
-          </div>
-        )}
+        {(() => {
+          const poster = dealContacts[deal.merchant_id];
+          const accepter = deal.customer_id ? dealContacts[deal.customer_id] : null;
+          return (
+            <div className="mb-3 space-y-2 rounded-lg bg-secondary/30 p-3 text-xs">
+              <div>
+                <p className="text-muted-foreground">Posted by (shopper)</p>
+                <p className="font-medium text-foreground">{poster?.full_name || "—"}</p>
+                <p className="text-muted-foreground">
+                  {poster?.phone || "No phone on file"}
+                  {poster?.email ? ` · ${poster.email}` : ""}
+                </p>
+              </div>
+              {accepter && (
+                <div className="border-t border-white/[0.06] pt-2">
+                  <p className="text-muted-foreground">Accepted by (card holder)</p>
+                  <p className="font-medium text-foreground">{accepter.full_name || "—"}</p>
+                  <p className="text-muted-foreground">
+                    {accepter.phone || "No phone on file"}
+                    {accepter.email ? ` · ${accepter.email}` : ""}
+                  </p>
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         <div className="flex flex-wrap gap-2">
           <Link to={`/deals/${deal.id}`} className="flex-1 min-w-[80px]">

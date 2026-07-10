@@ -9,6 +9,7 @@ import { OAUTH_REDIRECT_KEY } from "@/lib/app-url";
 import { supabase } from "@/lib/supabase";
 import { EmailOtpVerification } from "@/components/auth/EmailOtpVerification";
 import { storePendingReferral, getPendingReferral } from "@/lib/referral";
+import { isValidPhone } from "@/lib/validation";
 import { Gift } from "lucide-react";
 import type { AuthError } from "@supabase/supabase-js";
 
@@ -138,11 +139,13 @@ export default function Auth() {
   const handleSignUp = async ({
     fullName,
     email,
+    phone,
     password,
     preferredRole,
   }: {
     fullName: string;
     email: string;
+    phone: string;
     password: string;
     preferredRole: string;
   }) => {
@@ -155,6 +158,15 @@ export default function Auth() {
       return;
     }
 
+    if (!isValidPhone(phone)) {
+      toast({
+        title: "Enter a valid mobile number",
+        description: "Include your country code, e.g. +91 98765 43210.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     setLoading(true);
     try {
       const { error, session, needsEmailConfirmation } = await signUp(
@@ -162,6 +174,7 @@ export default function Auth() {
         password,
         fullName,
         preferredRole,
+        phone.trim(),
       );
 
       if (error) {

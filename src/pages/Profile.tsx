@@ -15,6 +15,7 @@ import {
 import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/lib/supabase";
+import { isValidPhone } from "@/lib/validation";
 import { ArrowLeft, Loader2, User } from "lucide-react";
 
 const roleOptions = [
@@ -52,12 +53,21 @@ export default function Profile() {
       return;
     }
 
+    if (!isValidPhone(form.phone)) {
+      toast({
+        title: "Mobile number required",
+        description: "Enter a valid number with country code, e.g. +91 98765 43210.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     setSaving(true);
     const { error } = await supabase
       .from("profiles")
       .update({
         full_name: form.full_name.trim(),
-        phone: form.phone.trim() || null,
+        phone: form.phone.trim(),
         preferred_role: form.preferred_role as "create_deals" | "accept_deals" | "both",
       })
       .eq("id", profile.id);
@@ -116,15 +126,20 @@ export default function Profile() {
                 <p className="mt-1 text-xs text-muted-foreground">Email is managed by your login and can't be changed here.</p>
               </div>
               <div>
-                <Label htmlFor="phone">Phone</Label>
+                <Label htmlFor="phone">Mobile number</Label>
                 <Input
                   id="phone"
                   type="tel"
+                  inputMode="tel"
                   value={form.phone}
                   onChange={(e) => setForm((p) => ({ ...p, phone: e.target.value }))}
-                  placeholder="+91 ..."
+                  placeholder="+91 98765 43210"
+                  required
                   className="mt-1"
                 />
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Required so the admin can contact you about your deals.
+                </p>
               </div>
               <div>
                 <Label>I want to</Label>

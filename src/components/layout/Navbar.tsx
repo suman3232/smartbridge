@@ -129,7 +129,7 @@ export function Navbar() {
 
             <button
               type="button"
-              className="md:hidden p-2 rounded-lg text-foreground hover:bg-white/[0.06] transition-colors"
+              className="relative z-[101] md:hidden p-2 rounded-lg text-foreground hover:bg-white/[0.06] transition-colors touch-manipulation select-none"
               onClick={() => setMobileMenuOpen((open) => !open)}
               aria-label={mobileMenuOpen ? "Close menu" : "Open menu"}
               aria-expanded={mobileMenuOpen}

@@ -10,7 +10,8 @@ import { useToast } from "@/hooks/use-toast";
 import { supabase, KYC } from "@/lib/supabase";
 import { FileUpload } from "@/components/ui/file-upload";
 import { KYC_BUCKET } from "@/lib/storage";
-import { ArrowLeft, FileCheck, Loader2 } from "lucide-react";
+import { normalizePan, panError, isValidPan } from "@/lib/validation";
+import { ArrowLeft, FileCheck, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
 
 export default function KYCPage() {
   const { profile } = useAuth();
@@ -63,8 +64,9 @@ export default function KYCPage() {
     const ifsc = form.ifsc_code.trim().toUpperCase();
     const account = form.account_number.replace(/\s/g, "");
 
-    if (!/^[A-Z]{5}[0-9]{4}[A-Z]$/.test(pan)) {
-      toast({ title: "Invalid PAN", description: "PAN must look like ABCDE1234F.", variant: "destructive" });
+    const panMsg = panError(pan);
+    if (panMsg) {
+      toast({ title: "Invalid PAN", description: panMsg, variant: "destructive" });
       return;
     }
     if (!/^[A-Z]{4}0[A-Z0-9]{6}$/.test(ifsc)) {
@@ -155,7 +157,28 @@ export default function KYCPage() {
               <form onSubmit={handleSubmit} className="space-y-4">
                 <div>
                   <Label htmlFor="pan_number">PAN number</Label>
-                  <Input id="pan_number" name="pan_number" value={form.pan_number} onChange={handleChange} required className="mt-1" />
+                  <Input
+                    id="pan_number"
+                    name="pan_number"
+                    value={form.pan_number}
+                    onChange={(e) => setForm((prev) => ({ ...prev, pan_number: normalizePan(e.target.value) }))}
+                    required
+                    maxLength={10}
+                    autoCapitalize="characters"
+                    placeholder="ABCDE1234F"
+                    className="mt-1 uppercase placeholder:normal-case"
+                  />
+                  {form.pan_number.length > 0 && (
+                    isValidPan(form.pan_number) ? (
+                      <p className="mt-1 flex items-center gap-1 text-xs text-success">
+                        <CheckCircle2 className="h-3.5 w-3.5" /> Valid PAN format
+                      </p>
+                    ) : (
+                      <p className="mt-1 flex items-center gap-1 text-xs text-muted-foreground">
+                        <AlertCircle className="h-3.5 w-3.5" /> {panError(form.pan_number)}
+                      </p>
+                    )
+                  )}
                 </div>
                 <div>
                   <Label>PAN / ID document</Label>

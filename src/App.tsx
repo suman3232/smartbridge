@@ -11,6 +11,7 @@ import { ReferralRedirect } from "@/components/auth/ReferralRedirect";
 import { PageLoader } from "@/components/layout/PageLoader";
 import { PwaProvider } from "@/components/pwa/PwaProvider";
 import { PwaManager } from "@/components/pwa/PwaManager";
+import { SupportFab } from "@/components/support/SupportFab";
 
 const LandingWithOAuthRedirect = lazy(() => import("./pages/LandingWithOAuthRedirect"));
 const Auth = lazy(() => import("./pages/Auth"));
@@ -25,6 +26,7 @@ const KYCPage = lazy(() => import("./pages/KYC"));
 const Profile = lazy(() => import("./pages/Profile"));
 const PriceTracker = lazy(() => import("./pages/PriceTracker"));
 const ReferAndEarn = lazy(() => import("./pages/ReferAndEarn"));
+const Support = lazy(() => import("./pages/Support"));
 const NotFound = lazy(() => import("./pages/NotFound"));
 
 const queryClient = new QueryClient({
@@ -61,9 +63,11 @@ const App = () => (
               <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
               <Route path="/tracker" element={<ProtectedRoute><PriceTracker /></ProtectedRoute>} />
               <Route path="/refer" element={<ProtectedRoute><ReferAndEarn /></ProtectedRoute>} />
+              <Route path="/support" element={<ProtectedRoute><Support /></ProtectedRoute>} />
               <Route path="*" element={<NotFound />} />
             </Routes>
           </Suspense>
+          <SupportFab />
         </BrowserRouter>
       </TooltipProvider>
     </AuthProvider>

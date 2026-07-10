@@ -14,6 +14,7 @@ import {
   FileCheck,
   LineChart,
   Gift,
+  LifeBuoy,
   Menu,
   X,
   LogOut
@@ -31,6 +32,7 @@ const navItems = [
   { icon: Gift, label: "Refer & Earn", href: "/refer" },
   { icon: Bell, label: "Notifications", href: "/notifications" },
   { icon: FileCheck, label: "KYC", href: "/kyc" },
+  { icon: LifeBuoy, label: "Support", href: "/support" },
 ];
 
 const adminItems = [
