@@ -254,7 +254,7 @@ export default function Auth() {
   if (otpEmail) {
     return (
       <div className="relative min-h-screen flex items-center justify-center bg-background px-4">
-        <header className="absolute left-0 top-0 z-20 px-4 py-3 md:px-8">
+        <header className="absolute left-0 top-0 z-50 px-4 py-3 md:px-8">
           <Link to="/" className="inline-flex items-center text-sm text-muted-foreground transition-colors hover:text-foreground">
             <ArrowLeft className="mr-2 h-4 w-4" />
             Back to home
@@ -271,7 +271,7 @@ export default function Auth() {
 
   return (
     <div className="relative min-h-screen overflow-x-hidden border-0 bg-background outline-none">
-      <header className="absolute left-0 top-0 z-20 flex items-center gap-3 px-4 py-3 md:w-1/2 md:px-8">
+      <header className="absolute left-0 top-0 z-50 flex items-center gap-3 px-4 py-3 md:w-1/2 md:px-8">
         <Link
           to="/"
           className="inline-flex items-center text-sm text-muted-foreground transition-colors hover:text-foreground"
