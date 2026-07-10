@@ -117,6 +117,10 @@ export default function AdminPanel() {
     kycId: null,
     notes: ""
   });
+  const [cancelDialog, setCancelDialog] = useState<{ open: boolean; dealId: string | null }>({
+    open: false,
+    dealId: null,
+  });
 
   useEffect(() => {
     if (!authLoading && !isAdmin) {
@@ -263,6 +267,22 @@ export default function AdminPanel() {
       toast({ title: "Error", description: error.message, variant: "destructive" });
     } else {
       toast({ title: "Deal completed", description: "Reimbursement + commission credited to card holder wallet" });
+      void fetchAll();
+    }
+  };
+
+  const handleCancel = async () => {
+    if (!cancelDialog.dealId) return;
+
+    setActionLoading(cancelDialog.dealId);
+    const { error } = await supabase.rpc("cancel_deal", { p_deal_id: cancelDialog.dealId });
+    setActionLoading(null);
+    setCancelDialog({ open: false, dealId: null });
+
+    if (error) {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    } else {
+      toast({ title: "Deal cancelled", description: "The deal is closed and removed from the open list." });
       void fetchAll();
     }
   };
@@ -537,6 +557,25 @@ export default function AdminPanel() {
                 <>
                   <CheckCircle className="w-4 h-4 mr-1" />
                   Complete & pay
+                </>
+              )}
+            </Button>
+          )}
+
+          {deal.status === "approved" && (
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => setCancelDialog({ open: true, dealId: deal.id })}
+              disabled={actionLoading === deal.id}
+              className="flex-1 min-w-[100px]"
+            >
+              {actionLoading === deal.id ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <>
+                  <XCircle className="w-4 h-4 mr-1" />
+                  Cancel deal
                 </>
               )}
             </Button>
@@ -926,6 +965,24 @@ export default function AdminPanel() {
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction onClick={handleReject} className="bg-destructive text-destructive-foreground">
               Reject Deal
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Cancel Deal Dialog */}
+      <AlertDialog open={cancelDialog.open} onOpenChange={(open) => !open && setCancelDialog({ open: false, dealId: null })}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Cancel this deal?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This closes the approved deal and removes it from the open list so no card holder can accept it. Only deals that haven't been accepted yet can be cancelled. This can't be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep deal</AlertDialogCancel>
+            <AlertDialogAction onClick={handleCancel} className="bg-destructive text-destructive-foreground">
+              Cancel deal
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
