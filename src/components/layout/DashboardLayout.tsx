@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Logo } from "@/components/brand/Logo";
+import { InstallButton } from "@/components/pwa/InstallButton";
 
 const navItems = [
   { icon: LayoutDashboard, label: "Dashboard", href: "/dashboard" },
@@ -125,6 +126,7 @@ export function DashboardLayout({ children }: { children: ReactNode }) {
             <p className="text-xs text-muted-foreground truncate">{profile?.email}</p>
           </div>
         </Link>
+        <InstallButton variant="outline" size="default" full className="mt-2 w-full justify-center" />
         <Button
           variant="ghost"
           className="w-full mt-2 justify-start text-muted-foreground"
@@ -149,7 +151,9 @@ export function DashboardLayout({ children }: { children: ReactNode }) {
             <Logo size="sm" />
           </Link>
         </div>
-        <div className="w-10" />
+        <div className="flex w-10 justify-end">
+          <InstallButton variant="ghost" size="sm" className="px-2" />
+        </div>
       </header>
 
       {/* Mobile sidebar overlay */}

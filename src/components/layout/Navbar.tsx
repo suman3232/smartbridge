@@ -5,6 +5,7 @@ import { Menu, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { Logo } from "@/components/brand/Logo";
+import { InstallButton } from "@/components/pwa/InstallButton";
 
 const LANDING_LINKS = [
   { label: "Roles", href: "#features" },
@@ -93,6 +94,7 @@ export function Navbar() {
             )}
 
             <div className="hidden md:flex items-center gap-1.5 shrink-0">
+              <InstallButton variant="ghost" className="text-muted-foreground" />
               {user ? (
                 <>
                   <Link to="/dashboard">
@@ -148,6 +150,7 @@ export function Navbar() {
           />
           <div className="absolute top-[4.5rem] left-3 right-3 nav-glass-scrolled rounded-2xl p-4 animate-fade-in">
             <div className="space-y-1">
+              <InstallButton variant="outline" size="default" full className="mb-2 w-full justify-center" />
               {isLanding && !user &&
                 LANDING_LINKS.map((link) =>
                   link.href.startsWith("#") ? (

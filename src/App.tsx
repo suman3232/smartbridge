@@ -9,6 +9,8 @@ import { ProtectedRoute } from "@/components/auth/ProtectedRoute";
 import { AdminRoute } from "@/components/auth/AdminRoute";
 import { ReferralRedirect } from "@/components/auth/ReferralRedirect";
 import { PageLoader } from "@/components/layout/PageLoader";
+import { PwaProvider } from "@/components/pwa/PwaProvider";
+import { PwaManager } from "@/components/pwa/PwaManager";
 
 const LandingWithOAuthRedirect = lazy(() => import("./pages/LandingWithOAuthRedirect"));
 const Auth = lazy(() => import("./pages/Auth"));
@@ -36,10 +38,12 @@ const queryClient = new QueryClient({
 
 const App = () => (
   <QueryClientProvider client={queryClient}>
+    <PwaProvider>
     <AuthProvider>
       <TooltipProvider>
         <Toaster />
         <Sonner />
+        <PwaManager />
         <BrowserRouter>
           <Suspense fallback={<PageLoader fullScreen />}>
             <Routes>
@@ -63,6 +67,7 @@ const App = () => (
         </BrowserRouter>
       </TooltipProvider>
     </AuthProvider>
+    </PwaProvider>
   </QueryClientProvider>
 );
 
