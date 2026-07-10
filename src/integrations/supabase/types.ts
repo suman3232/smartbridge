@@ -579,6 +579,23 @@ export type Database = {
         }
         Relationships: []
       }
+      app_settings: {
+        Row: {
+          id: boolean
+          support_whatsapp: string | null
+          updated_at: string
+        }
+        Insert: {
+          id?: boolean
+          support_whatsapp?: string | null
+          updated_at?: string
+        }
+        Update: {
+          support_whatsapp?: string | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
       referral_config: {
         Row: {
           id: boolean
@@ -922,6 +939,10 @@ export type Database = {
           p_enabled: boolean
         }
         Returns: Database["public"]["Tables"]["referral_config"]["Row"]
+      }
+      admin_update_support_number: {
+        Args: { p_number: string }
+        Returns: Database["public"]["Tables"]["app_settings"]["Row"]
       }
       admin_list_referrals: {
         Args: { p_status?: string | null }

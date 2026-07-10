@@ -241,6 +241,16 @@ CREATE TABLE IF NOT EXISTS public.referral_config (
 );
 INSERT INTO public.referral_config (id) VALUES (true) ON CONFLICT (id) DO NOTHING;
 
+-- App-wide settings the admin can edit from the dashboard (single-row singleton).
+-- support_whatsapp is the public support contact shown on deal cards. It starts
+-- NULL so no fake number is ever shown until an admin saves a real one.
+CREATE TABLE IF NOT EXISTS public.app_settings (
+  id BOOLEAN PRIMARY KEY DEFAULT true CHECK (id),
+  support_whatsapp TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+INSERT INTO public.app_settings (id) VALUES (true) ON CONFLICT (id) DO NOTHING;
+
 -- One referral per referred user, ever. Reward fires only on qualification.
 CREATE TABLE IF NOT EXISTS public.referrals (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -377,6 +387,7 @@ ALTER TABLE public.withdrawal_requests   ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.otp_records           ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.referral_config       ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.referrals             ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.app_settings          ENABLE ROW LEVEL SECURITY;
 
 -- ---------------------------------------------------------------------------
 -- Core security-definer helpers (needed by policies below)
@@ -612,6 +623,15 @@ CREATE POLICY "Admins manage referral config" ON public.referral_config
 DROP POLICY IF EXISTS "Referrer or admin can view referrals" ON public.referrals;
 CREATE POLICY "Referrer or admin can view referrals" ON public.referrals
   FOR SELECT USING (referrer_id = auth.uid() OR public.is_admin(auth.uid()));
+
+-- app_settings: the support contact is shown publicly (deal cards, incl. logged-out
+-- browsing), so anyone can read it. Writes happen only via admin_update_support_number.
+DROP POLICY IF EXISTS "Anyone can read app settings" ON public.app_settings;
+CREATE POLICY "Anyone can read app settings" ON public.app_settings
+  FOR SELECT USING (true);
+DROP POLICY IF EXISTS "Admins manage app settings" ON public.app_settings;
+CREATE POLICY "Admins manage app settings" ON public.app_settings
+  FOR ALL USING (public.is_admin(auth.uid()));
 
 -- ---------------------------------------------------------------------------
 -- Utility + signup trigger functions
@@ -1529,6 +1549,19 @@ BEGIN
       enabled = COALESCE(p_enabled, true), updated_at = now()
   WHERE id = true RETURNING * INTO cfg;
   RETURN cfg;
+END;
+$$;
+
+-- Admin: set the public support WhatsApp number shown on deal cards.
+CREATE OR REPLACE FUNCTION public.admin_update_support_number(p_number TEXT)
+RETURNS public.app_settings LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE row public.app_settings;
+BEGIN
+  IF NOT public.is_admin(auth.uid()) THEN RAISE EXCEPTION 'Only admins can update settings'; END IF;
+  UPDATE public.app_settings
+  SET support_whatsapp = NULLIF(TRIM(COALESCE(p_number, '')), ''), updated_at = now()
+  WHERE id = true RETURNING * INTO row;
+  RETURN row;
 END;
 $$;
 

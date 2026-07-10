@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { AcceptDealDialog } from "@/components/deals/AcceptDealDialog";
 import { WhatsAppButton } from "@/components/ui/whatsapp-button";
+import { useSupportWhatsApp } from "@/lib/settings";
 import { Navbar } from "@/components/layout/Navbar";
 import { PageHeader } from "@/components/ui/page-header";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -37,6 +38,7 @@ function BrowseDealsContent({
   const [deals, setDeals] = useState<OpenDeal[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const supportNumber = useSupportWhatsApp();
   const [selectedDeal, setSelectedDeal] = useState<OpenDeal | null>(null);
 
   const fetchDeals = async () => {
@@ -150,9 +152,9 @@ function BrowseDealsContent({
                     Delivery address is shared only after you accept, to protect the shopper's privacy.
                   </p>
 
-                  {deal.admin_contact_number && (
+                  {supportNumber && (
                     <WhatsAppButton
-                      phone={deal.admin_contact_number}
+                      phone={supportNumber}
                       message={`Hi, I need help with the OfferBridge deal "${deal.product_name}".`}
                       label="Chat with support"
                       className="w-full"

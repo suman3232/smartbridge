@@ -21,6 +21,7 @@ import {
   CheckCircle,
 } from "lucide-react";
 import { WhatsAppButton } from "@/components/ui/whatsapp-button";
+import { useSupportWhatsApp } from "@/lib/settings";
 
 type Order = {
   id: string;
@@ -37,6 +38,7 @@ export default function DealDetail() {
   const { toast } = useToast();
   const navigate = useNavigate();
 
+  const supportNumber = useSupportWhatsApp();
   const [deal, setDeal] = useState<Deal | null>(null);
   const [order, setOrder] = useState<Order | null>(null);
   const [loading, setLoading] = useState(true);
@@ -221,7 +223,7 @@ export default function DealDetail() {
           </Card>
         )}
 
-        {deal.admin_contact_number && (
+        {supportNumber && (
           <Card>
             <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
               <div>
@@ -229,7 +231,7 @@ export default function DealDetail() {
                 <p className="text-sm text-muted-foreground">Chat with the OfferBridge support team on WhatsApp.</p>
               </div>
               <WhatsAppButton
-                phone={deal.admin_contact_number}
+                phone={supportNumber}
                 message={`Hi, I need help with the OfferBridge deal "${deal.product_name}".`}
                 label="Chat with support"
                 className="shrink-0"

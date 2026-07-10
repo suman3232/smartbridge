@@ -9,6 +9,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/hooks/use-toast";
 import { supabase, Deal, WithdrawalRequest } from "@/lib/supabase";
 import { getSignedUrl, KYC_BUCKET } from "@/lib/storage";
+import { clearSupportWhatsAppCache } from "@/lib/settings";
 import { 
   Shield, 
   Clock, 
@@ -24,6 +25,7 @@ import {
   Users,
   AlertCircle,
   Gift,
+  MessageCircle,
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { 
@@ -104,6 +106,8 @@ export default function AdminPanel() {
     enabled: true,
   });
   const [savingConfig, setSavingConfig] = useState(false);
+  const [supportNumber, setSupportNumber] = useState("");
+  const [savingSupport, setSavingSupport] = useState(false);
   const [grantEmail, setGrantEmail] = useState("");
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -136,14 +140,17 @@ export default function AdminPanel() {
 
   const fetchAll = async () => {
     setLoading(true);
-    const [dealsRes, kycRes, withdrawalsRes, adminsRes, referralsRes, configRes] = await Promise.all([
+    const [dealsRes, kycRes, withdrawalsRes, adminsRes, referralsRes, configRes, settingsRes] = await Promise.all([
       supabase.from("deals").select("*").order("created_at", { ascending: false }),
       supabase.rpc("list_kycs_for_admin"),
       supabase.from("withdrawal_requests").select("*").order("created_at", { ascending: false }),
       supabase.rpc("list_admins"),
       supabase.rpc("admin_list_referrals"),
       supabase.from("referral_config").select("*").maybeSingle(),
+      supabase.from("app_settings").select("support_whatsapp").eq("id", true).maybeSingle(),
     ]);
+
+    if (settingsRes.data) setSupportNumber(settingsRes.data.support_whatsapp ?? "");
 
     if (referralsRes.data) setReferrals(referralsRes.data as AdminReferral[]);
     if (configRes.data) {
@@ -388,6 +395,24 @@ export default function AdminPanel() {
     } else {
       toast({ title: "Admin removed", description: "User no longer has admin access." });
       void fetchAll();
+    }
+  };
+
+  const handleSaveSupport = async (e: FormEvent) => {
+    e.preventDefault();
+    setSavingSupport(true);
+    const { error } = await supabase.rpc("admin_update_support_number", { p_number: supportNumber.trim() });
+    setSavingSupport(false);
+    if (error) {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    } else {
+      clearSupportWhatsAppCache();
+      toast({
+        title: "Support number saved",
+        description: supportNumber.trim()
+          ? "The WhatsApp support button now uses this number."
+          : "Support button hidden until a number is set.",
+      });
     }
   };
 
@@ -875,6 +900,35 @@ export default function AdminPanel() {
           </TabsContent>
 
           <TabsContent value="admins" className="space-y-4">
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <MessageCircle className="w-5 h-5" />
+                  Support WhatsApp number
+                </CardTitle>
+                <CardDescription>
+                  Shown as the "Chat with support" button on deal cards. Include the country code (e.g. +91 98765 43210). Leave blank to hide the button.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <form onSubmit={handleSaveSupport} className="flex flex-col sm:flex-row gap-3">
+                  <div className="flex-1 space-y-1">
+                    <Label htmlFor="support-number">Number</Label>
+                    <Input
+                      id="support-number"
+                      type="tel"
+                      placeholder="+91 98765 43210"
+                      value={supportNumber}
+                      onChange={(e) => setSupportNumber(e.target.value)}
+                    />
+                  </div>
+                  <Button type="submit" className="sm:self-end" disabled={savingSupport}>
+                    {savingSupport ? <Loader2 className="w-4 h-4 animate-spin" /> : "Save number"}
+                  </Button>
+                </form>
+              </CardContent>
+            </Card>
+
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">
