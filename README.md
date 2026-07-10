@@ -217,6 +217,31 @@ verification, so it works for both email/password and Google signups).
 
 Fully implemented in `setup.sql` + the app — **no external credentials required.**
 
+## Progressive Web App (PWA)
+
+OfferBridge is an installable PWA (via `vite-plugin-pwa` + Workbox).
+
+- **Install:** an **Install app** button appears in the header/navbar (and dashboard)
+  only when the browser reports the app is installable, and hides once installed.
+  On iOS Safari it opens **Add to Home Screen** guidance. Installs open in
+  **standalone** mode with the OfferBridge icon.
+- **Icons:** generated from the brand logo — `node scripts/gen-icons.mjs`
+  (writes 192/512/maskable/apple-touch/favicon into `public/`).
+- **Offline:** the app shell + assets are precached, so navigation and deep links
+  (`/r/:code`, `/deals/:id`, OAuth returns) work offline; an offline banner shows
+  when disconnected. Data pages fall back to their empty/error states offline.
+- **Updates:** a **"New version available → Update"** prompt appears when a new
+  build is deployed (no silent reloads).
+- **Security:** the service worker **only** precaches public build assets and
+  caches Google Fonts at runtime. **Supabase / API / auth / wallet / KYC and any
+  protected data are never cached** — those requests always hit the network.
+
+PWA features are active in production builds. Test locally with:
+
+```sh
+npm run build && npm run preview   # service worker runs on localhost
+```
+
 ## Scripts
 
 | Command             | Description                          |
