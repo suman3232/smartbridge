@@ -810,7 +810,7 @@ export type Database = {
           required_card: string
           card_offer_price: number
           commission_amount: number
-          delivery_address: string
+          delivery_address: string | null
         }[]
       }
       get_deal_for_viewer: {

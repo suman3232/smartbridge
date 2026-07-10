@@ -882,8 +882,12 @@ RETURNS TABLE (
 ) LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
 BEGIN
   IF auth.uid() IS NULL THEN RAISE EXCEPTION 'Sign in to accept deals'; END IF;
+  -- The delivery address is deliberately NOT returned here. It is only revealed
+  -- after the deal is accepted (see get_deal_for_viewer), to protect the
+  -- shopper's privacy. The WHERE clause still requires a valid address so that
+  -- only genuinely acceptable deals can be previewed and accepted.
   RETURN QUERY
-  SELECT d.id, d.product_name, d.required_card, d.card_offer_price, d.commission_amount, d.delivery_address
+  SELECT d.id, d.product_name, d.required_card, d.card_offer_price, d.commission_amount, NULL::TEXT
   FROM public.deals d
   WHERE d.id = p_deal_id AND d.status = 'approved' AND d.customer_id IS NULL
     AND d.merchant_id != auth.uid()

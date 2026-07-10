@@ -14,10 +14,10 @@ import {
   IndianRupee,
   ArrowRight,
   ShoppingBag,
-  Phone,
   ExternalLink,
 } from "lucide-react";
 import { AcceptDealDialog } from "@/components/deals/AcceptDealDialog";
+import { WhatsAppButton } from "@/components/ui/whatsapp-button";
 import { Navbar } from "@/components/layout/Navbar";
 import { PageHeader } from "@/components/ui/page-header";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -151,10 +151,12 @@ function BrowseDealsContent({
                   </p>
 
                   {deal.admin_contact_number && (
-                    <div className="flex items-center gap-2 p-3 rounded-xl bg-secondary/30">
-                      <Phone className="w-4 h-4 text-muted-foreground" />
-                      <span className="text-sm">Support: {deal.admin_contact_number}</span>
-                    </div>
+                    <WhatsAppButton
+                      phone={deal.admin_contact_number}
+                      message={`Hi, I need help with the OfferBridge deal "${deal.product_name}".`}
+                      label="Chat with support"
+                      className="w-full"
+                    />
                   )}
 
                   <div className="flex gap-2">

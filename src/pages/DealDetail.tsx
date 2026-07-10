@@ -18,9 +18,9 @@ import {
   Loader2,
   MapPin,
   Package,
-  Phone,
   CheckCircle,
 } from "lucide-react";
+import { WhatsAppButton } from "@/components/ui/whatsapp-button";
 
 type Order = {
   id: string;
@@ -223,12 +223,17 @@ export default function DealDetail() {
 
         {deal.admin_contact_number && (
           <Card>
-            <CardContent className="flex items-center gap-3 p-4">
-              <Phone className="w-5 h-5 text-muted-foreground" />
+            <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
               <div>
-                <p className="text-sm font-medium">Support contact</p>
-                <p className="text-sm text-muted-foreground">{deal.admin_contact_number}</p>
+                <p className="text-sm font-medium">Need help with this deal?</p>
+                <p className="text-sm text-muted-foreground">Chat with the OfferBridge support team on WhatsApp.</p>
               </div>
+              <WhatsAppButton
+                phone={deal.admin_contact_number}
+                message={`Hi, I need help with the OfferBridge deal "${deal.product_name}".`}
+                label="Chat with support"
+                className="shrink-0"
+              />
             </CardContent>
           </Card>
         )}

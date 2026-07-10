@@ -12,7 +12,9 @@ type AcceptPreview = {
   required_card: string;
   card_offer_price: number;
   commission_amount: number;
-  delivery_address: string;
+  // Address is intentionally not exposed here — it is only revealed after the
+  // deal is accepted, to protect the shopper's privacy.
+  delivery_address?: string | null;
 };
 
 interface AcceptDealDialogProps {
@@ -88,7 +90,6 @@ export function AcceptDealDialog({ deal, open, onOpenChange, onSuccess }: Accept
     required_card: deal.required_card,
     card_offer_price: deal.card_offer_price,
     commission_amount: deal.commission_amount,
-    delivery_address: "",
   };
 
   return (
@@ -125,19 +126,12 @@ export function AcceptDealDialog({ deal, open, onOpenChange, onSuccess }: Accept
           </div>
 
           <div className="p-4 rounded-xl border border-white/[0.08]">
-            <div className="flex items-start gap-2 mb-2">
+            <div className="flex items-start gap-2">
               <MapPin className="w-4 h-4 text-primary mt-0.5 shrink-0" />
-              <p className="text-sm font-medium">Ship to this address</p>
-            </div>
-            {previewLoading ? (
-              <div className="flex justify-center py-4">
-                <Loader2 className="w-5 h-5 animate-spin text-primary" />
-              </div>
-            ) : (
-              <p className="text-sm text-muted-foreground whitespace-pre-wrap pl-6">
-                {display.delivery_address || "Address available after you accept"}
+              <p className="text-sm text-muted-foreground">
+                Delivery address is shared only after you accept, to protect the shopper's privacy.
               </p>
-            )}
+            </div>
           </div>
         </div>
 
@@ -147,7 +141,7 @@ export function AcceptDealDialog({ deal, open, onOpenChange, onSuccess }: Accept
           </Button>
           <Button
             onClick={handleAccept}
-            disabled={loading || previewLoading || !preview?.delivery_address}
+            disabled={loading || previewLoading || !preview}
             className="flex-1"
           >
             {loading ? (
