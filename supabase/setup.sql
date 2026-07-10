@@ -261,6 +261,93 @@ CREATE INDEX IF NOT EXISTS referrals_referrer_idx ON public.referrals (referrer_
 CREATE INDEX IF NOT EXISTS referrals_status_idx ON public.referrals (status);
 
 -- ---------------------------------------------------------------------------
+-- Schema reconciliation for pre-existing databases
+-- ---------------------------------------------------------------------------
+-- CREATE TABLE IF NOT EXISTS above is a no-op when the table already exists, so a
+-- table created by an older version of this schema keeps its old column set. The
+-- indexes, RLS policies, and functions below reference the CURRENT columns, and a
+-- LANGUAGE sql function is validated at creation time — so a single missing column
+-- (e.g. "column p.email does not exist") aborts the whole script. Ensure every
+-- column exists here, nullable, with its default where defined. Each statement is
+-- a no-op when the column is already present and is safe on populated tables (no
+-- NOT NULL / CHECK added here, so existing rows never violate anything).
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS full_name TEXT;
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now();
+ALTER TABLE public.profiles ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
+
+ALTER TABLE public.user_roles ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now();
+
+ALTER TABLE public.kycs ADD COLUMN IF NOT EXISTS status public.kyc_status DEFAULT 'pending';
+ALTER TABLE public.kycs ADD COLUMN IF NOT EXISTS admin_notes TEXT;
+ALTER TABLE public.kycs ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now();
+ALTER TABLE public.kycs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
+
+ALTER TABLE public.admin_numbers ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true;
+ALTER TABLE public.admin_numbers ADD COLUMN IF NOT EXISTS last_assigned_at TIMESTAMPTZ;
+ALTER TABLE public.admin_numbers ADD COLUMN IF NOT EXISTS assignment_count INTEGER DEFAULT 0;
+ALTER TABLE public.admin_numbers ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now();
+
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS customer_id UUID;
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS expected_buy_price DECIMAL(10,2);
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS advance_amount DECIMAL(10,2);
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS remaining_amount DECIMAL(10,2);
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS commission_amount DECIMAL(10,2);
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS delivery_address TEXT;
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS admin_contact_number TEXT;
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS status public.deal_status DEFAULT 'pending';
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS admin_notes TEXT;
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now();
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
+
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS order_screenshot_url TEXT;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS tracking_id TEXT;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS delivery_otp TEXT;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS otp_verified BOOLEAN DEFAULT false;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS status public.order_status DEFAULT 'placed';
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now();
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
+
+ALTER TABLE public.delivery_confirmations ADD COLUMN IF NOT EXISTS notes TEXT;
+ALTER TABLE public.delivery_confirmations ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ DEFAULT now();
+
+ALTER TABLE public.wallets ADD COLUMN IF NOT EXISTS balance DECIMAL(10,2) DEFAULT 0;
+ALTER TABLE public.wallets ADD COLUMN IF NOT EXISTS locked_amount DECIMAL(10,2) DEFAULT 0;
+ALTER TABLE public.wallets ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now();
+ALTER TABLE public.wallets ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
+
+ALTER TABLE public.payments ADD COLUMN IF NOT EXISTS deal_id UUID;
+ALTER TABLE public.payments ADD COLUMN IF NOT EXISTS from_user_id UUID;
+ALTER TABLE public.payments ADD COLUMN IF NOT EXISTS to_user_id UUID;
+ALTER TABLE public.payments ADD COLUMN IF NOT EXISTS status public.payment_status DEFAULT 'pending';
+ALTER TABLE public.payments ADD COLUMN IF NOT EXISTS description TEXT;
+ALTER TABLE public.payments ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now();
+
+ALTER TABLE public.notifications ADD COLUMN IF NOT EXISTS type TEXT DEFAULT 'info';
+ALTER TABLE public.notifications ADD COLUMN IF NOT EXISTS is_read BOOLEAN DEFAULT false;
+ALTER TABLE public.notifications ADD COLUMN IF NOT EXISTS link TEXT;
+ALTER TABLE public.notifications ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now();
+
+ALTER TABLE public.withdrawal_requests ADD COLUMN IF NOT EXISTS admin_notes TEXT;
+ALTER TABLE public.withdrawal_requests ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now();
+ALTER TABLE public.withdrawal_requests ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
+
+ALTER TABLE public.otp_records ADD COLUMN IF NOT EXISTS verified_by UUID;
+ALTER TABLE public.otp_records ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pending';
+ALTER TABLE public.otp_records ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ DEFAULT now();
+ALTER TABLE public.otp_records ADD COLUMN IF NOT EXISTS verified_at TIMESTAMPTZ;
+ALTER TABLE public.otp_records ADD COLUMN IF NOT EXISTS notes TEXT;
+
+ALTER TABLE public.referrals ADD COLUMN IF NOT EXISTS code_used TEXT;
+ALTER TABLE public.referrals ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pending';
+ALTER TABLE public.referrals ADD COLUMN IF NOT EXISTS qualifying_deal_id UUID;
+ALTER TABLE public.referrals ADD COLUMN IF NOT EXISTS referrer_reward_amount DECIMAL(10,2);
+ALTER TABLE public.referrals ADD COLUMN IF NOT EXISTS referred_reward_amount DECIMAL(10,2);
+ALTER TABLE public.referrals ADD COLUMN IF NOT EXISTS admin_notes TEXT;
+ALTER TABLE public.referrals ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now();
+ALTER TABLE public.referrals ADD COLUMN IF NOT EXISTS qualified_at TIMESTAMPTZ;
+ALTER TABLE public.referrals ADD COLUMN IF NOT EXISTS reversed_at TIMESTAMPTZ;
+
+-- ---------------------------------------------------------------------------
 -- Indexes on hot FK / filter columns
 -- ---------------------------------------------------------------------------
 CREATE INDEX IF NOT EXISTS deals_merchant_idx ON public.deals (merchant_id);
