@@ -1,4 +1,4 @@
--- Deal detail with masked delivery address for non-participants (Yaper privacy)
+-- Deal detail with masked delivery address for non-participants (privacy by design)
 
 CREATE OR REPLACE FUNCTION public.get_deal_for_viewer(p_deal_id UUID)
 RETURNS TABLE (

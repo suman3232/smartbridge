@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label";
 import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/hooks/use-toast";
 import { supabase, Wallet as WalletType, KYC, WithdrawalRequest } from "@/lib/supabase";
+import { EmptyState } from "@/components/ui/empty-state";
 import {
   Wallet as WalletIcon,
   ArrowUpRight,
@@ -54,6 +55,8 @@ export default function Wallet() {
         .select("*")
         .eq("user_id", profile.id)
         .eq("status", "approved")
+        .order("created_at", { ascending: false })
+        .limit(1)
         .maybeSingle(),
       supabase
         .from("payments")
@@ -69,6 +72,11 @@ export default function Wallet() {
         .limit(10),
     ]);
 
+    const firstError = walletRes.error || paymentsRes.error || withdrawalsRes.error;
+    if (firstError) {
+      toast({ title: "Couldn't load wallet", description: firstError.message, variant: "destructive" });
+    }
+
     if (walletRes.data) setWallet(walletRes.data as WalletType);
     if (kycRes.data) setKyc(kycRes.data as KYC);
     if (paymentsRes.data) setPayments(paymentsRes.data as Payment[]);
@@ -76,14 +84,24 @@ export default function Wallet() {
     setLoading(false);
   };
 
+  const hasPendingWithdrawal = withdrawals.some((w) => w.status === "pending");
+
   useEffect(() => {
     void fetchData();
   }, [profile]);
 
   const handleWithdraw = async () => {
-    const amount = parseFloat(withdrawAmount);
+    const amount = Math.round((parseFloat(withdrawAmount) || 0) * 100) / 100;
     if (!amount || amount <= 0) {
       toast({ title: "Invalid amount", description: "Enter a valid withdrawal amount.", variant: "destructive" });
+      return;
+    }
+    if (amount > (wallet?.balance ?? 0)) {
+      toast({ title: "Amount exceeds balance", description: `You can withdraw up to ₹${(wallet?.balance ?? 0).toLocaleString()}.`, variant: "destructive" });
+      return;
+    }
+    if (hasPendingWithdrawal) {
+      toast({ title: "Withdrawal pending", description: "You already have a withdrawal awaiting transfer.", variant: "destructive" });
       return;
     }
 
@@ -113,7 +131,10 @@ export default function Wallet() {
     }
   };
 
-  const isIncoming = (payment: Payment) => payment.to_user_id === profile?.id;
+  // A withdrawal has from_user_id === to_user_id === the user, but it is money
+  // LEAVING the wallet, so it must read as outgoing.
+  const isIncoming = (payment: Payment) =>
+    payment.payment_type !== "withdrawal" && payment.to_user_id === profile?.id;
 
   return (
     <DashboardLayout>
@@ -130,9 +151,13 @@ export default function Wallet() {
                 <p className="text-sm opacity-80">Available balance</p>
                 <WalletIcon className="w-6 h-6 opacity-70" />
               </div>
-              <p className="text-4xl font-bold">₹{wallet?.balance?.toLocaleString() || "0"}</p>
+              {loading ? (
+                <div className="skeleton h-10 w-36 rounded-lg" style={{ background: "rgba(255,255,255,0.15)" }} />
+              ) : (
+                <p className="num text-4xl font-bold">₹{(wallet?.balance ?? 0).toLocaleString()}</p>
+              )}
               {wallet && wallet.locked_amount > 0 && (
-                <p className="text-xs opacity-80 mt-2">
+                <p className="num text-xs opacity-80 mt-2">
                   ₹{wallet.locked_amount.toLocaleString()} pending withdrawal
                 </p>
               )}
@@ -160,9 +185,12 @@ export default function Wallet() {
                   className="mt-1"
                 />
               </div>
-              <Button onClick={handleWithdraw} disabled={withdrawing || !wallet?.balance} className="w-full">
-                {withdrawing ? <Loader2 className="w-4 h-4 animate-spin" /> : "Request withdrawal"}
+              <Button onClick={handleWithdraw} disabled={withdrawing || !wallet?.balance || hasPendingWithdrawal} className="w-full">
+                {withdrawing ? <Loader2 className="w-4 h-4 animate-spin" /> : hasPendingWithdrawal ? "Withdrawal pending" : "Request withdrawal"}
               </Button>
+              {hasPendingWithdrawal && (
+                <p className="text-xs text-muted-foreground">A withdrawal is awaiting admin transfer. You can request again once it's processed.</p>
+              )}
             </CardContent>
           </Card>
         ) : (
@@ -213,13 +241,12 @@ export default function Wallet() {
                 ))}
               </div>
             ) : payments.length === 0 ? (
-              <div className="text-center py-12">
-                <div className="w-16 h-16 rounded-2xl bg-secondary flex items-center justify-center mx-auto mb-4">
-                  <IndianRupee className="w-8 h-8 text-muted-foreground" />
-                </div>
-                <p className="text-muted-foreground">No transactions yet</p>
-                <p className="text-sm text-muted-foreground">Complete deals as a card holder to earn here</p>
-              </div>
+              <EmptyState
+                icon={IndianRupee}
+                title="No transactions yet"
+                description="Reimbursements, commissions, and referral rewards will appear here as you complete deals."
+                compact
+              />
             ) : (
               <div className="space-y-3">
                 {payments.map((payment) => (

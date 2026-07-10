@@ -22,7 +22,6 @@ export default defineConfig(({ mode }) => ({
         manualChunks(id) {
           if (!id.includes("node_modules")) return;
 
-          if (id.includes("@splinetool")) return "spline";
           if (id.includes("gsap")) return "gsap";
           if (id.includes("@supabase")) return "supabase";
           if (id.includes("@tanstack/react-query")) return "query";

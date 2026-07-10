@@ -60,6 +60,34 @@ export default function CreateDeal() {
       return;
     }
 
+    if (originalPrice <= 0) {
+      toast({ title: "Error", description: "Original price must be greater than 0", variant: "destructive" });
+      return;
+    }
+
+    if (originalPrice < cardOfferPrice) {
+      toast({
+        title: "Check your pricing",
+        description: "Original price should be at least the card offer price.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (expectedBuyPrice < cardOfferPrice) {
+      toast({
+        title: "Check your pricing",
+        description: "Expected buy price can't be lower than the card offer price.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (commissionAmount < 0) {
+      toast({ title: "Error", description: "Commission can't be negative", variant: "destructive" });
+      return;
+    }
+
     if (!formData.delivery_address.trim()) {
       toast({ title: "Error", description: "Delivery address is required", variant: "destructive" });
       return;
@@ -194,6 +222,8 @@ export default function CreateDeal() {
                         id="original_price"
                         name="original_price"
                         type="number"
+                        min="0"
+                        step="0.01"
                         placeholder="0"
                         value={formData.original_price}
                         onChange={handleChange}
@@ -211,6 +241,8 @@ export default function CreateDeal() {
                         id="card_offer_price"
                         name="card_offer_price"
                         type="number"
+                        min="0"
+                        step="0.01"
                         placeholder="0"
                         value={formData.card_offer_price}
                         onChange={handleChange}
@@ -229,6 +261,8 @@ export default function CreateDeal() {
                         id="expected_buy_price"
                         name="expected_buy_price"
                         type="number"
+                        min="0"
+                        step="0.01"
                         placeholder="0"
                         value={formData.expected_buy_price}
                         onChange={handleChange}
@@ -247,6 +281,8 @@ export default function CreateDeal() {
                         id="commission_amount"
                         name="commission_amount"
                         type="number"
+                        min="0"
+                        step="0.01"
                         placeholder="0"
                         value={formData.commission_amount}
                         onChange={handleChange}

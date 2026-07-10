@@ -1,13 +1,10 @@
 import * as React from "react";
 import { useState, useId, useEffect } from "react";
-import { Eye, EyeOff, LogIn, Sparkles } from "lucide-react";
+import { Eye, EyeOff, LogIn, Sparkles, CreditCard, Wallet, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { SplineScene } from "@/components/ui/splite";
 import { cn } from "@/lib/utils";
-
-const SPLINE_SCENE = "https://prod.spline.design/kZDDjO5HuC9GJUM2/scene.splinecode";
 
 export interface PasswordInputProps extends React.InputHTMLAttributes<HTMLInputElement> {
   label?: string;
@@ -357,37 +354,31 @@ const authSplineCopy = {
   },
 } as const;
 
+const authHighlights = [
+  { icon: CreditCard, title: "Use your card", desc: "Place orders on cards you own and earn on every deal." },
+  { icon: Wallet, title: "Reimbursed + commission", desc: "Get the order cost back plus a cash reward in your wallet." },
+  { icon: ShieldCheck, title: "Admin-verified payouts", desc: "KYC-verified withdrawals straight to your bank account." },
+];
+
 function AuthSplinePanel({ isSignIn }: { isSignIn: boolean }) {
   const copy = isSignIn ? authSplineCopy.signin : authSplineCopy.signup;
-  const [mountScene, setMountScene] = useState(false);
-
-  useEffect(() => {
-    const finePointer = window.matchMedia("(pointer: fine)").matches;
-    if (!finePointer) return;
-
-    const idle = window.requestIdleCallback(
-      () => setMountScene(true),
-      { timeout: 2500 },
-    );
-
-    return () => window.cancelIdleCallback(idle);
-  }, []);
 
   return (
-    <div className="pointer-events-none relative h-[min(680px,calc(100vh-4rem))] w-full overflow-hidden bg-background">
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_70%_50%,hsl(217_91%_60%/0.06),transparent_55%)]" />
+    <div className="relative h-[min(680px,calc(100vh-4rem))] w-full overflow-hidden rounded-3xl border border-white/[0.06] bg-background">
+      {/* Lightweight branded backdrop (replaces the heavy 3D scene) */}
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_70%_20%,hsl(217_91%_60%/0.18),transparent_55%)]" />
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_20%_90%,hsl(217_91%_60%/0.10),transparent_50%)]" />
+      <div className="pointer-events-none absolute -right-16 top-1/3 h-72 w-72 rounded-full bg-primary/20 blur-3xl animate-float" />
+      <div
+        className="pointer-events-none absolute inset-0 opacity-[0.04]"
+        style={{
+          backgroundImage:
+            "linear-gradient(to right, currentColor 1px, transparent 1px), linear-gradient(to bottom, currentColor 1px, transparent 1px)",
+          backgroundSize: "40px 40px",
+        }}
+      />
 
-      <div className="auth-spline-canvas pointer-events-none absolute inset-0 z-0 flex items-center justify-center bg-background p-4">
-        <div className="pointer-events-none h-full w-full origin-[center_55%] scale-[0.78] lg:scale-[0.82] xl:scale-[0.88]">
-          {mountScene ? (
-            <SplineScene scene={SPLINE_SCENE} className="pointer-events-none h-full w-full bg-background" />
-          ) : (
-            <div className="h-full w-full bg-background" aria-hidden="true" />
-          )}
-        </div>
-      </div>
-
-      <div className="relative z-10 flex h-full flex-col justify-center bg-gradient-to-r from-background/80 via-background/30 to-transparent p-8 lg:max-w-[58%] lg:p-10">
+      <div className="relative z-10 flex h-full flex-col justify-center p-8 lg:p-12">
         <span className="mb-4 inline-flex w-fit items-center gap-1.5 rounded-full bg-primary/15 px-3 py-1 text-xs font-semibold uppercase tracking-wider text-primary">
           {isSignIn ? <LogIn className="size-3" /> : <Sparkles className="size-3" />}
           {copy.badge}
@@ -398,6 +389,20 @@ function AuthSplinePanel({ isSignIn }: { isSignIn: boolean }) {
         <p className="mt-4 max-w-sm text-sm leading-relaxed text-muted-foreground lg:text-base">
           {copy.subtitle}
         </p>
+
+        <div className="mt-10 space-y-4">
+          {authHighlights.map((h) => (
+            <div key={h.title} className="flex items-start gap-3">
+              <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-white/[0.05] border border-white/[0.07]">
+                <h.icon className="h-4 w-4 text-primary" />
+              </div>
+              <div>
+                <p className="text-sm font-semibold">{h.title}</p>
+                <p className="text-xs text-muted-foreground leading-relaxed">{h.desc}</p>
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );

@@ -1,4 +1,4 @@
--- Yaper-aligned deal flow: shopper provides address, card holder places order, admin completes payout
+-- OfferBridge deal flow: shopper provides address, card holder places order, admin completes payout
 
 CREATE OR REPLACE FUNCTION public.accept_deal(p_deal_id UUID, p_delivery_address TEXT DEFAULT NULL)
 RETURNS public.deals

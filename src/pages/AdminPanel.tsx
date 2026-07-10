@@ -7,7 +7,8 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/hooks/use-toast";
-import { supabase, Deal, KYC, WithdrawalRequest } from "@/lib/supabase";
+import { supabase, Deal, WithdrawalRequest } from "@/lib/supabase";
+import { getSignedUrl, KYC_BUCKET } from "@/lib/storage";
 import { 
   Shield, 
   Clock, 
@@ -22,7 +23,9 @@ import {
   UserPlus,
   Users,
   AlertCircle,
+  Gift,
 } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
 import { 
   AlertDialog,
   AlertDialogAction,
@@ -44,21 +47,74 @@ type AdminUser = {
   granted_at: string;
 };
 
+type AdminKyc = {
+  id: string;
+  user_id: string;
+  full_name: string;
+  email: string;
+  pan_number: string;
+  document_url: string;
+  bank_name: string;
+  account_number: string;
+  ifsc_code: string;
+  status: string;
+  admin_notes: string | null;
+  created_at: string;
+};
+
+type AdminReferral = {
+  id: string;
+  referrer_name: string;
+  referrer_email: string;
+  referred_name: string;
+  referred_email: string;
+  code_used: string | null;
+  status: string;
+  referrer_reward_amount: number | null;
+  referred_reward_amount: number | null;
+  qualifying_deal_id: string | null;
+  admin_notes: string | null;
+  created_at: string;
+  qualified_at: string | null;
+};
+
+type ReferralConfigForm = {
+  referrer_reward: string;
+  welcome_bonus: string;
+  min_qualifying_amount: string;
+  max_rewards_per_referrer: string;
+  enabled: boolean;
+};
+
 export default function AdminPanel() {
   const { isAdmin, profile, loading: authLoading } = useAuth();
   const navigate = useNavigate();
   const { toast } = useToast();
   
   const [deals, setDeals] = useState<Deal[]>([]);
-  const [kycs, setKycs] = useState<KYC[]>([]);
+  const [kycs, setKycs] = useState<AdminKyc[]>([]);
   const [withdrawals, setWithdrawals] = useState<WithdrawalRequest[]>([]);
   const [admins, setAdmins] = useState<AdminUser[]>([]);
+  const [referrals, setReferrals] = useState<AdminReferral[]>([]);
+  const [refConfig, setRefConfig] = useState<ReferralConfigForm>({
+    referrer_reward: "50",
+    welcome_bonus: "25",
+    min_qualifying_amount: "500",
+    max_rewards_per_referrer: "",
+    enabled: true,
+  });
+  const [savingConfig, setSavingConfig] = useState(false);
   const [grantEmail, setGrantEmail] = useState("");
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [rejectDialog, setRejectDialog] = useState<{ open: boolean; dealId: string | null; notes: string }>({
     open: false,
     dealId: null,
+    notes: ""
+  });
+  const [kycRejectDialog, setKycRejectDialog] = useState<{ open: boolean; kycId: string | null; notes: string }>({
+    open: false,
+    kycId: null,
     notes: ""
   });
 
@@ -76,12 +132,26 @@ export default function AdminPanel() {
 
   const fetchAll = async () => {
     setLoading(true);
-    const [dealsRes, kycRes, withdrawalsRes, adminsRes] = await Promise.all([
+    const [dealsRes, kycRes, withdrawalsRes, adminsRes, referralsRes, configRes] = await Promise.all([
       supabase.from("deals").select("*").order("created_at", { ascending: false }),
-      supabase.from("kycs").select("*").order("created_at", { ascending: false }),
+      supabase.rpc("list_kycs_for_admin"),
       supabase.from("withdrawal_requests").select("*").order("created_at", { ascending: false }),
       supabase.rpc("list_admins"),
+      supabase.rpc("admin_list_referrals"),
+      supabase.from("referral_config").select("*").maybeSingle(),
     ]);
+
+    if (referralsRes.data) setReferrals(referralsRes.data as AdminReferral[]);
+    if (configRes.data) {
+      const c = configRes.data;
+      setRefConfig({
+        referrer_reward: String(c.referrer_reward),
+        welcome_bonus: String(c.welcome_bonus),
+        min_qualifying_amount: String(c.min_qualifying_amount),
+        max_rewards_per_referrer: c.max_rewards_per_referrer != null ? String(c.max_rewards_per_referrer) : "",
+        enabled: c.enabled,
+      });
+    }
 
     if (dealsRes.error) {
       toast({ title: "Error", description: dealsRes.error.message, variant: "destructive" });
@@ -89,7 +159,26 @@ export default function AdminPanel() {
       setDeals(dealsRes.data as Deal[]);
     }
 
-    if (kycRes.data) setKycs(kycRes.data as KYC[]);
+    if (kycRes.error) {
+      // Fallback if list_kycs_for_admin RPC not applied yet — raw table (no name/email).
+      const { data: rawKycs } = await supabase
+        .from("kycs")
+        .select("*")
+        .order("created_at", { ascending: false });
+      if (rawKycs) {
+        setKycs(
+          rawKycs.map((k) => ({
+            ...k,
+            full_name: "",
+            email: "",
+            status: String(k.status),
+            created_at: k.created_at ?? new Date().toISOString(),
+          })) as AdminKyc[],
+        );
+      }
+    } else if (kycRes.data) {
+      setKycs(kycRes.data as AdminKyc[]);
+    }
 
     if (withdrawalsRes.error && !withdrawalsRes.error.message.includes("does not exist")) {
       toast({ title: "Withdrawals", description: withdrawalsRes.error.message, variant: "destructive" });
@@ -190,17 +279,19 @@ export default function AdminPanel() {
     }
   };
 
-  const handleRejectKyc = async (kycId: string) => {
-    setActionLoading(kycId);
+  const handleRejectKyc = async () => {
+    if (!kycRejectDialog.kycId) return;
+    setActionLoading(kycRejectDialog.kycId);
     const { error } = await supabase.rpc("reject_kyc", {
-      p_kyc_id: kycId,
-      p_notes: "Please resubmit with correct bank details.",
+      p_kyc_id: kycRejectDialog.kycId,
+      p_notes: kycRejectDialog.notes.trim() || "Please resubmit with correct bank details.",
     });
     setActionLoading(null);
+    setKycRejectDialog({ open: false, kycId: null, notes: "" });
     if (error) {
       toast({ title: "Error", description: error.message, variant: "destructive" });
     } else {
-      toast({ title: "KYC rejected" });
+      toast({ title: "KYC rejected", description: "The applicant has been notified." });
       void fetchAll();
     }
   };
@@ -214,6 +305,35 @@ export default function AdminPanel() {
     } else {
       toast({ title: "Withdrawal completed", description: "Marked as transferred to bank" });
       void fetchAll();
+    }
+  };
+
+  const handleRejectWithdrawal = async (requestId: string) => {
+    setActionLoading(requestId);
+    const { error } = await supabase.rpc("reject_withdrawal", { p_request_id: requestId });
+    setActionLoading(null);
+    if (error) {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    } else {
+      toast({ title: "Withdrawal rejected", description: "Amount returned to the user's wallet." });
+      void fetchAll();
+    }
+  };
+
+  const handleViewKycDoc = async (path: string) => {
+    if (!path) {
+      toast({ title: "No document", description: "No document was uploaded.", variant: "destructive" });
+      return;
+    }
+    // Open the tab synchronously inside the click handler so it isn't popup-blocked,
+    // then point it at the resolved URL once ready.
+    const win = window.open("", "_blank", "noopener,noreferrer");
+    const url = /^https?:\/\//.test(path) ? path : await getSignedUrl(KYC_BUCKET, path);
+    if (url && win) {
+      win.location.href = url;
+    } else {
+      win?.close();
+      toast({ title: "Could not open document", description: "The file may be missing.", variant: "destructive" });
     }
   };
 
@@ -250,6 +370,42 @@ export default function AdminPanel() {
       void fetchAll();
     }
   };
+
+  const handleSaveReferralConfig = async (e: FormEvent) => {
+    e.preventDefault();
+    setSavingConfig(true);
+    const { error } = await supabase.rpc("admin_update_referral_config", {
+      p_referrer_reward: parseFloat(refConfig.referrer_reward) || 0,
+      p_welcome_bonus: parseFloat(refConfig.welcome_bonus) || 0,
+      p_min_qualifying_amount: parseFloat(refConfig.min_qualifying_amount) || 0,
+      p_max_rewards_per_referrer: refConfig.max_rewards_per_referrer ? parseInt(refConfig.max_rewards_per_referrer, 10) : null,
+      p_enabled: refConfig.enabled,
+    });
+    setSavingConfig(false);
+    if (error) {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    } else {
+      toast({ title: "Referral settings saved" });
+      void fetchAll();
+    }
+  };
+
+  const handleVoidReferral = async (id: string, isRewarded: boolean) => {
+    setActionLoading(`ref-${id}`);
+    const { error } = await supabase.rpc("admin_void_referral", {
+      p_id: id,
+      p_notes: isRewarded ? "Reversed by admin" : "Voided by admin",
+    });
+    setActionLoading(null);
+    if (error) {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    } else {
+      toast({ title: isRewarded ? "Referral reversed" : "Referral voided" });
+      void fetchAll();
+    }
+  };
+
+  const pendingReferrals = referrals.filter((r) => r.status === "pending").length;
 
   const pendingDeals = deals.filter((d) => d.status === "pending");
   const pendingKycs = kycs.filter((k) => k.status === "pending");
@@ -400,12 +556,12 @@ export default function AdminPanel() {
           </div>
           <div>
             <h1 className="text-2xl font-bold">Admin Panel</h1>
-            <p className="text-muted-foreground">Yaper flow — approve requests, complete payouts, verify KYC</p>
+            <p className="text-muted-foreground">Approve requests, complete payouts, and verify KYC</p>
           </div>
         </div>
 
         {/* Stats */}
-        <div className="grid grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <Card>
             <CardContent className="p-4 flex items-center gap-3">
               <div className="w-10 h-10 rounded-xl bg-warning/10 flex items-center justify-center">
@@ -443,7 +599,7 @@ export default function AdminPanel() {
 
         {/* Tabs */}
         <Tabs defaultValue="pending" className="space-y-4">
-          <TabsList>
+          <TabsList className="flex w-full overflow-x-auto justify-start">
             <TabsTrigger value="pending" className="gap-2">
               <Clock className="w-4 h-4" />
               Pending ({pendingDeals.length})
@@ -463,6 +619,10 @@ export default function AdminPanel() {
             <TabsTrigger value="withdrawals" className="gap-2">
               <Banknote className="w-4 h-4" />
               Payouts ({pendingWithdrawals.length})
+            </TabsTrigger>
+            <TabsTrigger value="referrals" className="gap-2">
+              <Gift className="w-4 h-4" />
+              Referrals ({pendingReferrals})
             </TabsTrigger>
             <TabsTrigger value="admins" className="gap-2">
               <Users className="w-4 h-4" />
@@ -528,15 +688,22 @@ export default function AdminPanel() {
                 {pendingKycs.map((kyc) => (
                   <Card key={kyc.id}>
                     <CardContent className="p-4 space-y-3">
-                      <p className="font-medium">User {kyc.user_id.slice(0, 8)}…</p>
+                      <div>
+                        <p className="font-medium">{kyc.full_name || `User ${kyc.user_id.slice(0, 8)}…`}</p>
+                        {kyc.email && <p className="text-xs text-muted-foreground">{kyc.email}</p>}
+                      </div>
                       <p className="text-sm text-muted-foreground">PAN: {kyc.pan_number}</p>
                       <p className="text-sm text-muted-foreground">Bank: {kyc.bank_name} · {kyc.ifsc_code}</p>
                       <p className="text-sm text-muted-foreground">A/C: {kyc.account_number}</p>
+                      <Button size="sm" variant="outline" onClick={() => handleViewKycDoc(kyc.document_url)}>
+                        <ExternalLink className="w-4 h-4 mr-1" />
+                        View document
+                      </Button>
                       <div className="flex gap-2">
                         <Button size="sm" onClick={() => handleApproveKyc(kyc.id)} disabled={actionLoading === kyc.id}>
                           Approve
                         </Button>
-                        <Button size="sm" variant="destructive" onClick={() => handleRejectKyc(kyc.id)} disabled={actionLoading === kyc.id}>
+                        <Button size="sm" variant="destructive" onClick={() => setKycRejectDialog({ open: true, kycId: kyc.id, notes: "" })} disabled={actionLoading === kyc.id}>
                           Reject
                         </Button>
                       </div>
@@ -562,14 +729,110 @@ export default function AdminPanel() {
                       <p className="text-xs text-muted-foreground">
                         Requested {new Date(req.created_at).toLocaleString()}
                       </p>
-                      <Button size="sm" onClick={() => handleCompleteWithdrawal(req.id)} disabled={actionLoading === req.id}>
-                        Mark transferred to bank
-                      </Button>
+                      <div className="flex gap-2">
+                        <Button size="sm" onClick={() => handleCompleteWithdrawal(req.id)} disabled={actionLoading === req.id}>
+                          Mark transferred
+                        </Button>
+                        <Button size="sm" variant="destructive" onClick={() => handleRejectWithdrawal(req.id)} disabled={actionLoading === req.id}>
+                          Reject
+                        </Button>
+                      </div>
                     </CardContent>
                   </Card>
                 ))}
               </div>
             )}
+          </TabsContent>
+
+          <TabsContent value="referrals" className="space-y-4">
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Gift className="w-5 h-5" />
+                  Referral program settings
+                </CardTitle>
+                <CardDescription>
+                  Configure rewards and eligibility. Rewards credit only after a referred user's first completed deal that meets the minimum value.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <form onSubmit={handleSaveReferralConfig} className="space-y-4">
+                  <div className="grid sm:grid-cols-2 gap-4">
+                    <div>
+                      <Label htmlFor="rr">Referrer reward (₹)</Label>
+                      <Input id="rr" type="number" min="0" step="0.01" value={refConfig.referrer_reward}
+                        onChange={(e) => setRefConfig((c) => ({ ...c, referrer_reward: e.target.value }))} className="mt-1" />
+                    </div>
+                    <div>
+                      <Label htmlFor="wb">Welcome bonus (₹)</Label>
+                      <Input id="wb" type="number" min="0" step="0.01" value={refConfig.welcome_bonus}
+                        onChange={(e) => setRefConfig((c) => ({ ...c, welcome_bonus: e.target.value }))} className="mt-1" />
+                    </div>
+                    <div>
+                      <Label htmlFor="mqa">Min. qualifying deal value (₹)</Label>
+                      <Input id="mqa" type="number" min="0" step="0.01" value={refConfig.min_qualifying_amount}
+                        onChange={(e) => setRefConfig((c) => ({ ...c, min_qualifying_amount: e.target.value }))} className="mt-1" />
+                    </div>
+                    <div>
+                      <Label htmlFor="cap">Max rewards per referrer (blank = unlimited)</Label>
+                      <Input id="cap" type="number" min="0" value={refConfig.max_rewards_per_referrer}
+                        onChange={(e) => setRefConfig((c) => ({ ...c, max_rewards_per_referrer: e.target.value }))} placeholder="Unlimited" className="mt-1" />
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <Switch checked={refConfig.enabled} onCheckedChange={(v) => setRefConfig((c) => ({ ...c, enabled: v }))} />
+                    <span className="text-sm">{refConfig.enabled ? "Program enabled" : "Program paused"}</span>
+                  </div>
+                  <Button type="submit" disabled={savingConfig}>
+                    {savingConfig ? <Loader2 className="w-4 h-4 animate-spin" /> : "Save settings"}
+                  </Button>
+                </form>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>All referrals ({referrals.length})</CardTitle>
+                <CardDescription>Investigate and reverse/void suspicious referrals.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {referrals.length === 0 ? (
+                  <p className="py-8 text-center text-muted-foreground">No referrals yet.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {referrals.map((r) => (
+                      <div key={r.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-3 rounded-xl bg-secondary/30">
+                        <div className="min-w-0">
+                          <p className="text-sm">
+                            <span className="font-medium">{r.referrer_name}</span>
+                            <span className="text-muted-foreground"> ({r.referrer_email})</span>
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            referred <span className="text-foreground">{r.referred_name}</span> ({r.referred_email}) · code {r.code_used}
+                          </p>
+                          {r.admin_notes && <p className="text-xs text-destructive mt-0.5">{r.admin_notes}</p>}
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <Badge variant={getStatusVariant(r.status === "rewarded" ? "completed" : r.status === "pending" ? "pending" : "rejected")} className="capitalize">
+                            {r.status}
+                          </Badge>
+                          {r.status === "rewarded" && r.referrer_reward_amount != null && (
+                            <span className="text-sm font-medium text-success">₹{r.referrer_reward_amount}</span>
+                          )}
+                          {(r.status === "pending" || r.status === "rewarded") && (
+                            <Button size="sm" variant="outline"
+                              onClick={() => handleVoidReferral(r.id, r.status === "rewarded")}
+                              disabled={actionLoading === `ref-${r.id}`}>
+                              {r.status === "rewarded" ? "Reverse" : "Void"}
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
           </TabsContent>
 
           <TabsContent value="admins" className="space-y-4">
@@ -663,6 +926,31 @@ export default function AdminPanel() {
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction onClick={handleReject} className="bg-destructive text-destructive-foreground">
               Reject Deal
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* KYC Reject Dialog */}
+      <AlertDialog open={kycRejectDialog.open} onOpenChange={(open) => !open && setKycRejectDialog({ ...kycRejectDialog, open: false })}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Reject KYC</AlertDialogTitle>
+            <AlertDialogDescription>
+              Tell the applicant what to fix. This message is shown to them so they can resubmit correctly.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="py-4">
+            <Textarea
+              placeholder="e.g. PAN image is blurry / account number doesn't match name…"
+              value={kycRejectDialog.notes}
+              onChange={(e) => setKycRejectDialog({ ...kycRejectDialog, notes: e.target.value })}
+            />
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={handleRejectKyc} className="bg-destructive text-destructive-foreground">
+              Reject KYC
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

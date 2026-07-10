@@ -19,6 +19,9 @@ import {
 } from "lucide-react";
 import { AcceptDealDialog } from "@/components/deals/AcceptDealDialog";
 import { Navbar } from "@/components/layout/Navbar";
+import { PageHeader } from "@/components/ui/page-header";
+import { EmptyState } from "@/components/ui/empty-state";
+import { FadeIn } from "@/components/ui/fade-in";
 
 function BrowseDealsContent({
   profile,
@@ -73,52 +76,50 @@ function BrowseDealsContent({
   return (
     <>
       <div className="space-y-6">
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-bold">Earn with your card</h1>
-            <p className="text-muted-foreground">
-              Accept shopping requests — get reimbursed + commission after delivery
-            </p>
-          </div>
-          <div className="relative w-full sm:w-72">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-            <Input
-              placeholder="Search deals or cards..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="pl-10"
-            />
-          </div>
-        </div>
+        <PageHeader
+          eyebrow="Browse deals"
+          title="Earn with your card"
+          description="Accept shopping requests — get reimbursed plus commission after delivery."
+          actions={
+            <div className="relative w-full sm:w-72">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+              <Input
+                placeholder="Search deals or cards…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="pl-10"
+              />
+            </div>
+          }
+        />
 
         {loading ? (
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {[1, 2, 3, 4, 5, 6].map((i) => (
-              <Card key={i} className="animate-pulse">
-                <CardContent className="p-6">
-                  <div className="h-6 bg-secondary rounded w-3/4 mb-4" />
-                  <div className="h-4 bg-secondary rounded w-1/2 mb-2" />
-                  <div className="h-4 bg-secondary rounded w-2/3" />
-                </CardContent>
-              </Card>
+            {[0, 1, 2, 3, 4, 5].map((i) => (
+              <div key={i} className="surface p-5 space-y-4">
+                <div className="skeleton h-5 w-3/4 rounded" />
+                <div className="skeleton h-4 w-1/2 rounded" />
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="skeleton h-14 rounded-lg" />
+                  <div className="skeleton h-14 rounded-lg" />
+                </div>
+                <div className="skeleton h-9 rounded-lg" />
+              </div>
             ))}
           </div>
         ) : filteredDeals.length === 0 ? (
-          <Card>
-            <CardContent className="flex flex-col items-center justify-center py-16">
-              <div className="w-16 h-16 rounded-2xl bg-secondary flex items-center justify-center mb-4">
-                <ShoppingBag className="w-8 h-8 text-muted-foreground" />
-              </div>
-              <h3 className="text-lg font-semibold mb-1">No open requests</h3>
-              <p className="text-muted-foreground text-center">
-                {search ? "No deals match your search" : "Check back when shoppers post new requests"}
-              </p>
-            </CardContent>
-          </Card>
+          <div className="surface">
+            <EmptyState
+              icon={ShoppingBag}
+              title={search ? "No matching deals" : "No open requests right now"}
+              description={search ? "Try a different product or card name." : "New shopping requests appear here as shoppers post them. Check back soon."}
+            />
+          </div>
         ) : (
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {filteredDeals.map((deal) => (
-              <Card key={deal.id} className="hover:-translate-y-1 hover:shadow-lg transition-all duration-300">
+            {filteredDeals.map((deal, i) => (
+              <FadeIn key={deal.id} index={Math.min(i, 8)}>
+              <Card className="surface-hover h-full">
                 <CardHeader className="pb-3">
                   <div className="flex items-start justify-between">
                     <div>
@@ -146,7 +147,7 @@ function BrowseDealsContent({
                   </div>
 
                   <p className="text-xs text-muted-foreground">
-                    Delivery address shared after you accept (Yaper-style privacy).
+                    Delivery address is shared only after you accept, to protect the shopper's privacy.
                   </p>
 
                   {deal.admin_contact_number && (
@@ -175,6 +176,7 @@ function BrowseDealsContent({
                   </div>
                 </CardContent>
               </Card>
+              </FadeIn>
             ))}
           </div>
         )}

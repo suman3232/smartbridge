@@ -9,6 +9,8 @@ import { Label } from "@/components/ui/label";
 import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/hooks/use-toast";
 import { supabase, Deal } from "@/lib/supabase";
+import { FileUpload } from "@/components/ui/file-upload";
+import { ORDER_SCREENSHOT_BUCKET, getSignedUrl } from "@/lib/storage";
 import {
   ArrowLeft,
   CreditCard,
@@ -40,18 +42,35 @@ export default function DealDetail() {
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
   const [trackingId, setTrackingId] = useState("");
-  const [screenshotUrl, setScreenshotUrl] = useState("");
+  const [screenshotPath, setScreenshotPath] = useState("");
+  const [screenshotSignedUrl, setScreenshotSignedUrl] = useState<string | null>(null);
 
   const fetchDeal = async () => {
-    if (!id) return;
+    if (!id) {
+      setLoading(false);
+      return;
+    }
 
     const [dealRes, orderRes] = await Promise.all([
       supabase.rpc("get_deal_for_viewer", { p_deal_id: id }),
       supabase.from("orders").select("*").eq("deal_id", id).maybeSingle(),
     ]);
 
+    if (dealRes.error) {
+      toast({ title: "Couldn't load deal", description: dealRes.error.message, variant: "destructive" });
+    }
     if (dealRes.data?.[0]) setDeal(dealRes.data[0] as Deal);
-    if (orderRes.data) setOrder(orderRes.data as Order);
+    if (orderRes.data) {
+      const ord = orderRes.data as Order;
+      setOrder(ord);
+      if (ord.order_screenshot_url) {
+        // Stored value is a private-bucket path; resolve a short-lived signed URL.
+        const signed = /^https?:\/\//.test(ord.order_screenshot_url)
+          ? ord.order_screenshot_url
+          : await getSignedUrl(ORDER_SCREENSHOT_BUCKET, ord.order_screenshot_url);
+        setScreenshotSignedUrl(signed);
+      }
+    }
     setLoading(false);
   };
 
@@ -72,7 +91,7 @@ export default function DealDetail() {
     const { error } = await supabase.rpc("place_deal_order", {
       p_deal_id: deal.id,
       p_tracking_id: trackingId.trim() || null,
-      p_order_screenshot_url: screenshotUrl.trim() || null,
+      p_order_screenshot_url: screenshotPath.trim() || null,
     });
 
     setActionLoading(false);
@@ -100,6 +119,22 @@ export default function DealDetail() {
       toast({ title: "Error", description: error.message, variant: "destructive" });
     } else {
       toast({ title: "Deal completed", description: "Reimbursement and commission credited to card holder wallet." });
+      fetchDeal();
+    }
+  };
+
+  const handleCancelDeal = async () => {
+    if (!deal) return;
+    setActionLoading(true);
+
+    const { error } = await supabase.rpc("cancel_deal", { p_deal_id: deal.id });
+
+    setActionLoading(false);
+
+    if (error) {
+      toast({ title: "Could not cancel", description: error.message, variant: "destructive" });
+    } else {
+      toast({ title: "Deal cancelled", description: "Your request has been withdrawn." });
       fetchDeal();
     }
   };
@@ -205,6 +240,16 @@ export default function DealDetail() {
               Open product link
             </Button>
           </a>
+          {isShopper && (deal.status === "pending" || deal.status === "approved") && (
+            <Button
+              variant="destructive"
+              onClick={handleCancelDeal}
+              disabled={actionLoading}
+              className="shrink-0"
+            >
+              {actionLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : "Cancel deal"}
+            </Button>
+          )}
         </div>
 
         {isCardHolder && deal.status === "accepted" && !order && (
@@ -230,14 +275,16 @@ export default function DealDetail() {
                 />
               </div>
               <div>
-                <Label htmlFor="screenshot">Order screenshot URL (optional)</Label>
-                <Input
-                  id="screenshot"
-                  value={screenshotUrl}
-                  onChange={(e) => setScreenshotUrl(e.target.value)}
-                  placeholder="Link to order confirmation image"
-                  className="mt-1"
-                />
+                <Label>Order screenshot (optional)</Label>
+                <div className="mt-1">
+                  <FileUpload
+                    bucket={ORDER_SCREENSHOT_BUCKET}
+                    accept="image/*"
+                    label="Upload order confirmation"
+                    onUploaded={({ path }) => setScreenshotPath(path)}
+                    onCleared={() => setScreenshotPath("")}
+                  />
+                </div>
               </div>
               <Button onClick={handlePlaceOrder} disabled={actionLoading} className="w-full">
                 {actionLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : "I've placed the order"}
@@ -254,10 +301,10 @@ export default function DealDetail() {
             <CardContent className="space-y-2 text-sm">
               <p><span className="text-muted-foreground">Status:</span> <span className="capitalize">{order.status.replace("_", " ")}</span></p>
               {order.tracking_id && <p><span className="text-muted-foreground">Tracking:</span> {order.tracking_id}</p>}
-              {order.order_screenshot_url && (
+              {order.order_screenshot_url && screenshotSignedUrl && (
                 <p>
                   <span className="text-muted-foreground">Screenshot:</span>{" "}
-                  <a href={order.order_screenshot_url} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                  <a href={screenshotSignedUrl} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
                     View
                   </a>
                 </p>
@@ -279,7 +326,7 @@ export default function DealDetail() {
             <CardHeader>
               <CardTitle>Admin: complete deal</CardTitle>
               <CardDescription>
-                After delivery is verified, complete the deal to credit reimbursement (₹{deal.card_offer_price.toLocaleString()}) + commission (₹{deal.commission_amount.toLocaleString()}) to the card holder wallet.
+                Once you've confirmed the shopper received the product and settled payment, complete the deal to credit reimbursement (₹{deal.card_offer_price.toLocaleString()}) + commission (₹{deal.commission_amount.toLocaleString()}) to the card holder's wallet.
               </CardDescription>
             </CardHeader>
             <CardContent>

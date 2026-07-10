@@ -1,7 +1,8 @@
-import { createContext, useContext, useEffect, useState, ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, useState, ReactNode } from "react";
 import { User, Session, AuthError } from "@supabase/supabase-js";
 import { getAuthRedirectUrl, OAUTH_REDIRECT_KEY } from "@/lib/app-url";
 import { supabase, Profile } from "@/lib/supabase";
+import { applyPendingReferral } from "@/lib/referral";
 
 
 export type AuthResult = {
@@ -15,6 +16,7 @@ type AuthContextType = {
   session: Session | null;
   profile: Profile | null;
   isAdmin: boolean;
+  isVerified: boolean;
   loading: boolean;
   signUp: (email: string, password: string, fullName: string, preferredRole: string) => Promise<AuthResult>;
   signIn: (email: string, password: string) => Promise<AuthResult>;
@@ -31,6 +33,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [loading, setLoading] = useState(true);
+  // Tracks the user id whose profile/role we've already loaded, so the two init
+  // paths (onAuthStateChange INITIAL_SESSION + getSession) don't double-fetch.
+  const loadedUserId = useRef<string | null>(null);
 
   const fetchProfile = async (userId: string) => {
     const { data, error } = await supabase
@@ -45,22 +50,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const checkAdminRole = async (userId: string) => {
-    const { data, error } = await supabase.rpc("is_admin", { _user_id: userId });
+    // Read our own role row directly (RLS: "Users can view their own roles").
+    // is_admin() RPC is intentionally not client-callable (enumeration oracle).
+    const { data: roleRow } = await supabase
+      .from("user_roles")
+      .select("role")
+      .eq("user_id", userId)
+      .eq("role", "admin")
+      .maybeSingle();
 
-    if (error) {
-      // Fallback if RPC missing (migration not applied yet)
-      const { data: roleRow } = await supabase
-        .from("user_roles")
-        .select("role")
-        .eq("user_id", userId)
-        .eq("role", "admin")
-        .maybeSingle();
-
-      setIsAdmin(!!roleRow);
-      return;
-    }
-
-    setIsAdmin(!!data);
+    setIsAdmin(!!roleRow);
   };
 
   const loadUserData = async (userId: string) => {
@@ -71,14 +70,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setSession(nextSession);
     setUser(nextSession?.user ?? null);
 
-    if (nextSession?.user) {
-      await loadUserData(nextSession.user.id);
-    } else {
-      setProfile(null);
-      setIsAdmin(false);
+    try {
+      if (nextSession?.user) {
+        // Skip if we've already loaded this user's data (dedup double init).
+        if (loadedUserId.current !== nextSession.user.id) {
+          loadedUserId.current = nextSession.user.id;
+          await loadUserData(nextSession.user.id);
+          // Attribute any pending referral once the user is verified (email OTP
+          // done, or a Google user who is verified by default). Fire-and-forget.
+          if (nextSession.user.email_confirmed_at) {
+            void applyPendingReferral();
+          }
+        }
+      } else {
+        loadedUserId.current = null;
+        setProfile(null);
+        setIsAdmin(false);
+      }
+    } finally {
+      // Always resolve loading, even if profile/role fetch throws, so the app
+      // never gets stuck on the full-screen spinner.
+      setLoading(false);
     }
-
-    setLoading(false);
   };
 
   useEffect(() => {
@@ -152,15 +165,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     if (!error && data.url) {
       window.location.assign(data.url);
+      return { error: null };
+    }
+
+    // No redirect URL and no error → synthesize one so the caller can reset its
+    // loading state instead of hanging on a disabled button forever.
+    if (!error && !data.url) {
+      return { error: { message: "Could not start Google sign-in. Please try again." } as AuthError };
     }
 
     return { error };
   };
 
   const signOut = async () => {
-    await supabase.auth.signOut();
-    setProfile(null);
-    setIsAdmin(false);
+    const { error } = await supabase.auth.signOut();
+    // Local state is cleared by the SIGNED_OUT auth event; clear here too as a
+    // safety net only when the server sign-out succeeded.
+    if (!error) {
+      setProfile(null);
+      setIsAdmin(false);
+    }
   };
 
   const refreshProfile = async () => {
@@ -176,6 +200,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       session,
       profile,
       isAdmin,
+      isVerified: !!user?.email_confirmed_at,
       loading,
       signUp,
       signIn,

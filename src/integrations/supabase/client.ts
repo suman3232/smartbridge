@@ -20,5 +20,8 @@ export const supabase = createClient<Database>(SUPABASE_URL, SUPABASE_PUBLISHABL
     persistSession: true,
     autoRefreshToken: true,
     detectSessionInUrl: true,
+    // PKCE keeps tokens out of the URL fragment and returns a one-time ?code=
+    // that detectSessionInUrl exchanges — the flow the redirect handling expects.
+    flowType: "pkce",
   },
 });

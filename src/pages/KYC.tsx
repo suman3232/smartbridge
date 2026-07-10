@@ -7,7 +7,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/hooks/use-toast";
-import { supabase, KYC, WithdrawalRequest } from "@/lib/supabase";
+import { supabase, KYC } from "@/lib/supabase";
+import { FileUpload } from "@/components/ui/file-upload";
+import { KYC_BUCKET } from "@/lib/storage";
 import { ArrowLeft, FileCheck, Loader2 } from "lucide-react";
 
 export default function KYCPage() {
@@ -29,13 +31,16 @@ export default function KYCPage() {
       setLoading(false);
       return;
     }
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("kycs")
       .select("*")
       .eq("user_id", profile.id)
       .order("created_at", { ascending: false })
       .limit(1)
       .maybeSingle();
+    if (error) {
+      toast({ title: "Couldn't load KYC status", description: error.message, variant: "destructive" });
+    }
     if (data) setExisting(data as KYC);
     setLoading(false);
   };
@@ -54,14 +59,35 @@ export default function KYCPage() {
     e.preventDefault();
     if (!profile) return;
 
+    const pan = form.pan_number.trim().toUpperCase();
+    const ifsc = form.ifsc_code.trim().toUpperCase();
+    const account = form.account_number.replace(/\s/g, "");
+
+    if (!/^[A-Z]{5}[0-9]{4}[A-Z]$/.test(pan)) {
+      toast({ title: "Invalid PAN", description: "PAN must look like ABCDE1234F.", variant: "destructive" });
+      return;
+    }
+    if (!/^[A-Z]{4}0[A-Z0-9]{6}$/.test(ifsc)) {
+      toast({ title: "Invalid IFSC", description: "IFSC must look like HDFC0001234.", variant: "destructive" });
+      return;
+    }
+    if (!/^\d{9,18}$/.test(account)) {
+      toast({ title: "Invalid account number", description: "Enter a 9–18 digit account number.", variant: "destructive" });
+      return;
+    }
+    if (!form.document_url.trim()) {
+      toast({ title: "Document required", description: "Upload your PAN / ID document.", variant: "destructive" });
+      return;
+    }
+
     setSubmitting(true);
     const { error } = await supabase.from("kycs").insert({
       user_id: profile.id,
-      pan_number: form.pan_number.trim(),
+      pan_number: pan,
       document_url: form.document_url.trim(),
       bank_name: form.bank_name.trim(),
-      account_number: form.account_number.trim(),
-      ifsc_code: form.ifsc_code.trim(),
+      account_number: account,
+      ifsc_code: ifsc,
       status: "pending",
     });
 
@@ -132,8 +158,19 @@ export default function KYCPage() {
                   <Input id="pan_number" name="pan_number" value={form.pan_number} onChange={handleChange} required className="mt-1" />
                 </div>
                 <div>
-                  <Label htmlFor="document_url">ID document URL</Label>
-                  <Input id="document_url" name="document_url" type="url" value={form.document_url} onChange={handleChange} required className="mt-1" placeholder="https://..." />
+                  <Label>PAN / ID document</Label>
+                  <div className="mt-1">
+                    <FileUpload
+                      bucket={KYC_BUCKET}
+                      accept="image/*,application/pdf"
+                      label="Upload PAN / ID (image or PDF)"
+                      onUploaded={({ path }) => setForm((prev) => ({ ...prev, document_url: path }))}
+                      onCleared={() => setForm((prev) => ({ ...prev, document_url: "" }))}
+                    />
+                  </div>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Stored privately. Only admins reviewing your KYC can open it.
+                  </p>
                 </div>
                 <div>
                   <Label htmlFor="bank_name">Bank name</Label>

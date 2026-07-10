@@ -3,10 +3,13 @@ import { useNavigate, useSearchParams, Link, useLocation } from "react-router-do
 import { useAuth } from "@/contexts/AuthContext";
 import { AuthUI } from "@/components/ui/auth-fuse";
 import { useToast } from "@/hooks/use-toast";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Loader2 } from "lucide-react";
 import { formatAuthError } from "@/lib/auth-errors";
 import { OAUTH_REDIRECT_KEY } from "@/lib/app-url";
 import { supabase } from "@/lib/supabase";
+import { EmailOtpVerification } from "@/components/auth/EmailOtpVerification";
+import { storePendingReferral, getPendingReferral } from "@/lib/referral";
+import { Gift } from "lucide-react";
 import type { AuthError } from "@supabase/supabase-js";
 
 const preferenceOptions = [
@@ -32,6 +35,9 @@ export default function Auth() {
   const [searchParams, setSearchParams] = useSearchParams();
   const isSignUp = searchParams.get("mode") === "signup";
   const [loading, setLoading] = useState(false);
+  const [otpEmail, setOtpEmail] = useState<string | null>(null);
+  const [otpDestination, setOtpDestination] = useState("/dashboard");
+  const [referralCode, setReferralCode] = useState<string | null>(null);
 
   const { signIn, signUp, signInWithGoogle, user, loading: authLoading } = useAuth();
   const navigate = useNavigate();
@@ -39,12 +45,27 @@ export default function Auth() {
   const redirectTo = (location.state as { from?: string } | null)?.from ?? "/dashboard";
   const { toast } = useToast();
 
+  // Capture a referral code from the link (?ref=CODE) so it survives signup +
+  // email verification and is applied after the account is verified.
+  useEffect(() => {
+    const ref = searchParams.get("ref");
+    if (ref) {
+      storePendingReferral(ref);
+      setReferralCode(ref.trim().toUpperCase());
+    } else {
+      const stored = getPendingReferral();
+      if (stored) setReferralCode(stored);
+    }
+  }, [searchParams]);
+
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
     const authError =
       params.get("error_description") ??
-      hashParams.get("error_description");
+      hashParams.get("error_description") ??
+      params.get("error") ??
+      hashParams.get("error");
     const errorCode = params.get("error_code") ?? hashParams.get("error_code");
 
     if (authError || errorCode) {
@@ -77,6 +98,14 @@ export default function Auth() {
     setLoading(true);
     try {
       const { error, session } = await signIn(email, password);
+
+      if (error && error.code === "email_not_confirmed") {
+        // Existing unverified account — move straight to OTP verification.
+        setOtpDestination(redirectTo);
+        setOtpEmail(email);
+        return;
+      }
+
       if (error) {
         toast({
           title: "Sign In Failed",
@@ -144,17 +173,16 @@ export default function Auth() {
         return;
       }
 
+      const destination = redirectTo === "/dashboard" ? signupRedirect(preferredRole) : redirectTo;
+
       if (needsEmailConfirmation) {
-        toast({
-          title: "Confirm your email",
-          description:
-            "We sent a verification link. Open it, then sign in. For local dev, you can turn off Confirm email in Supabase → Authentication → Providers → Email.",
-        });
-        setSearchParams({});
+        // Show the 6-digit OTP verification step. The stored referral code is
+        // applied automatically once the email is verified.
+        toast({ title: "Check your inbox", description: `We sent a 6-digit code to ${email}.` });
+        setOtpDestination(destination);
+        setOtpEmail(email);
         return;
       }
-
-      const destination = redirectTo === "/dashboard" ? signupRedirect(preferredRole) : redirectTo;
 
       if (session) {
         toast({
@@ -212,9 +240,38 @@ export default function Auth() {
     }
   };
 
+  // Don't flash the auth form while the session is resolving or if already
+  // signed in (the effect above will redirect).
+  if (authLoading || user) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <Loader2 className="w-8 h-8 animate-spin text-primary" />
+      </div>
+    );
+  }
+
+  // Email OTP verification step (only when Supabase "Confirm email" is enabled).
+  if (otpEmail) {
+    return (
+      <div className="relative min-h-screen flex items-center justify-center bg-background px-4">
+        <header className="absolute left-0 top-0 z-20 px-4 py-3 md:px-8">
+          <Link to="/" className="inline-flex items-center text-sm text-muted-foreground transition-colors hover:text-foreground">
+            <ArrowLeft className="mr-2 h-4 w-4" />
+            Back to home
+          </Link>
+        </header>
+        <EmailOtpVerification
+          email={otpEmail}
+          onVerified={() => navigate(otpDestination, { replace: true })}
+          onBack={() => setOtpEmail(null)}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="relative min-h-screen overflow-x-hidden border-0 bg-background outline-none">
-      <header className="absolute left-0 top-0 z-20 px-4 py-3 md:w-1/2 md:px-8">
+      <header className="absolute left-0 top-0 z-20 flex items-center gap-3 px-4 py-3 md:w-1/2 md:px-8">
         <Link
           to="/"
           className="inline-flex items-center text-sm text-muted-foreground transition-colors hover:text-foreground"
@@ -222,6 +279,12 @@ export default function Auth() {
           <ArrowLeft className="mr-2 h-4 w-4" />
           Back to home
         </Link>
+        {referralCode && (
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-success/10 border border-success/20 px-3 py-1 text-xs font-medium text-success">
+            <Gift className="h-3.5 w-3.5" />
+            Referred · {referralCode}
+          </span>
+        )}
       </header>
 
       <AuthUI

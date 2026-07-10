@@ -1,4 +1,4 @@
--- Complete Yaper-aligned flow: admin visibility, privacy, KYC review, withdrawals
+-- Complete OfferBridge flow: admin visibility, privacy, KYC review, withdrawals
 
 -- Admins can view all deals (pending tab, full oversight)
 DROP POLICY IF EXISTS "Admins can view all deals" ON public.deals;
@@ -30,7 +30,7 @@ CREATE POLICY "Users can insert their own KYC" ON public.kycs
 ALTER TABLE public.orders DROP CONSTRAINT IF EXISTS orders_deal_id_key;
 ALTER TABLE public.orders ADD CONSTRAINT orders_deal_id_key UNIQUE (deal_id);
 
--- Withdrawal requests (Yaper-style payout to bank after KYC)
+-- Withdrawal requests (payout to bank after KYC)
 CREATE TABLE IF NOT EXISTS public.withdrawal_requests (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,

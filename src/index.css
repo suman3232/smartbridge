@@ -38,7 +38,7 @@
     --input: 222 28% 16%;
     --ring: 217 91% 60%;
 
-    --radius: 1rem;
+    --radius: 0.75rem;
 
     --gradient-primary: linear-gradient(135deg, hsl(217, 91%, 58%) 0%, hsl(199, 89%, 55%) 100%);
     --gradient-hero: linear-gradient(135deg, hsl(217, 91%, 52%) 0%, hsl(199, 89%, 50%) 100%);
@@ -227,9 +227,93 @@
   }
 }
 
+@layer components {
+  /* Refined app surface — subtle top highlight + hairline border, not a bubbly box */
+  .surface {
+    @apply relative rounded-xl border border-white/[0.06] bg-card/70;
+    box-shadow: 0 1px 0 hsla(0, 0%, 100%, 0.03) inset, var(--shadow-sm);
+  }
+  .surface-hover {
+    @apply transition-[transform,border-color,box-shadow] duration-200 ease-out;
+  }
+  .surface-hover:hover {
+    @apply -translate-y-0.5 border-white/[0.12];
+    box-shadow: var(--shadow-md);
+  }
+
+  /* Interactive press feedback for clickable rows/buttons */
+  .press {
+    @apply transition-transform duration-150 ease-out active:scale-[0.98];
+  }
+
+  /* Money / metrics read as data, not prose */
+  .num {
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
+  }
+}
+
 @layer utilities {
   .text-balance {
     text-wrap: balance;
+  }
+
+  /* Purposeful entrance motion (respects reduced-motion below) */
+  .animate-fade-up {
+    opacity: 0;
+    animation: fade-up 0.5s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  }
+  .animate-scale-in {
+    opacity: 0;
+    animation: scale-in 0.28s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+  }
+  .page-enter {
+    animation: page-enter 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+}
+
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes scale-in {
+  from { opacity: 0; transform: scale(0.96); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes page-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Skeleton shimmer used across loading states */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: hsl(222 30% 12%);
+}
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, hsla(0, 0%, 100%, 0.05), transparent);
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes skeleton-shimmer {
+  100% { transform: translateX(100%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-up,
+  .animate-scale-in,
+  .page-enter,
+  .animate-float,
+  .skeleton::after {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
   }
 }
 

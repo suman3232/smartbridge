@@ -3,6 +3,7 @@ import { DashboardLayout } from "@/components/layout/DashboardLayout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/contexts/AuthContext";
+import { useToast } from "@/hooks/use-toast";
 import { supabase, Notification } from "@/lib/supabase";
 import { 
   Bell, 
@@ -18,6 +19,7 @@ import { formatDistanceToNow } from "date-fns";
 
 export default function Notifications() {
   const { profile } = useAuth();
+  const { toast } = useToast();
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [loading, setLoading] = useState(true);
   const [markingAll, setMarkingAll] = useState(false);
@@ -33,12 +35,15 @@ export default function Notifications() {
   const fetchNotifications = async () => {
     if (!profile) return;
 
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("notifications")
       .select("*")
       .eq("user_id", profile.id)
       .order("created_at", { ascending: false });
 
+    if (error) {
+      toast({ title: "Couldn't load notifications", description: error.message, variant: "destructive" });
+    }
     if (data) setNotifications(data as Notification[]);
     setLoading(false);
   };
@@ -71,11 +76,18 @@ export default function Notifications() {
   const getIcon = (type: string) => {
     switch (type) {
       case "success": return <CheckCircle className="w-5 h-5 text-success" />;
-      case "error": return <XCircle className="w-5 h-5 text-destructive" />;
+      case "error":
+      case "destructive": return <XCircle className="w-5 h-5 text-destructive" />;
       case "warning": return <AlertCircle className="w-5 h-5 text-warning" />;
       default: return <Info className="w-5 h-5 text-primary" />;
     }
   };
+
+  const iconBg = (type: string) =>
+    type === "success" ? "bg-success/10"
+    : type === "error" || type === "destructive" ? "bg-destructive/10"
+    : type === "warning" ? "bg-warning/10"
+    : "bg-primary/10";
 
   const unreadCount = notifications.filter(n => !n.is_read).length;
 
@@ -124,17 +136,20 @@ export default function Notifications() {
                 {notifications.map((notification) => (
                   <div
                     key={notification.id}
+                    role={!notification.is_read ? "button" : undefined}
+                    tabIndex={!notification.is_read ? 0 : undefined}
                     className={`p-4 flex items-start gap-4 hover:bg-secondary/30 transition-colors ${
-                      !notification.is_read ? "bg-primary/5" : ""
+                      !notification.is_read ? "bg-primary/5 cursor-pointer" : ""
                     }`}
                     onClick={() => !notification.is_read && markAsRead(notification.id)}
+                    onKeyDown={(e) => {
+                      if (!notification.is_read && (e.key === "Enter" || e.key === " ")) {
+                        e.preventDefault();
+                        markAsRead(notification.id);
+                      }
+                    }}
                   >
-                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
-                      notification.type === "success" ? "bg-success/10" :
-                      notification.type === "error" ? "bg-destructive/10" :
-                      notification.type === "warning" ? "bg-warning/10" :
-                      "bg-primary/10"
-                    }`}>
+                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${iconBg(notification.type)}`}>
                       {getIcon(notification.type)}
                     </div>
                     <div className="flex-1 min-w-0">

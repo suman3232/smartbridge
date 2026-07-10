@@ -249,6 +249,89 @@ export type Database = {
           },
         ]
       }
+      tracked_products: {
+        Row: {
+          id: string
+          user_id: string
+          url: string
+          platform: string
+          external_id: string | null
+          product_name: string
+          image_url: string | null
+          currency: string
+          current_price: number | null
+          original_price: number | null
+          availability: string | null
+          seller: string | null
+          target_price: number | null
+          notify_enabled: boolean
+          last_alerted_price: number | null
+          last_checked_at: string | null
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          user_id: string
+          url: string
+          platform?: string
+          external_id?: string | null
+          product_name: string
+          image_url?: string | null
+          currency?: string
+          current_price?: number | null
+          original_price?: number | null
+          availability?: string | null
+          seller?: string | null
+          target_price?: number | null
+          notify_enabled?: boolean
+          last_alerted_price?: number | null
+          last_checked_at?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          platform?: string
+          product_name?: string
+          image_url?: string | null
+          current_price?: number | null
+          original_price?: number | null
+          availability?: string | null
+          seller?: string | null
+          target_price?: number | null
+          notify_enabled?: boolean
+          last_alerted_price?: number | null
+          last_checked_at?: string | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      product_price_history: {
+        Row: {
+          id: string
+          product_id: string
+          price: number
+          original_price: number | null
+          availability: string | null
+          source: string
+          checked_at: string
+        }
+        Insert: {
+          id?: string
+          product_id: string
+          price: number
+          original_price?: number | null
+          availability?: string | null
+          source?: string
+          checked_at?: string
+        }
+        Update: {
+          price?: number
+          original_price?: number | null
+          availability?: string | null
+        }
+        Relationships: []
+      }
       notifications: {
         Row: {
           created_at: string | null
@@ -469,6 +552,7 @@ export type Database = {
           id: string
           phone: string | null
           preferred_role: Database["public"]["Enums"]["user_preference"] | null
+          referral_code: string | null
           updated_at: string | null
         }
         Insert: {
@@ -479,6 +563,7 @@ export type Database = {
           id: string
           phone?: string | null
           preferred_role?: Database["public"]["Enums"]["user_preference"] | null
+          referral_code?: string | null
           updated_at?: string | null
         }
         Update: {
@@ -489,7 +574,69 @@ export type Database = {
           id?: string
           phone?: string | null
           preferred_role?: Database["public"]["Enums"]["user_preference"] | null
+          referral_code?: string | null
           updated_at?: string | null
+        }
+        Relationships: []
+      }
+      referral_config: {
+        Row: {
+          id: boolean
+          referrer_reward: number
+          welcome_bonus: number
+          min_qualifying_amount: number
+          max_rewards_per_referrer: number | null
+          enabled: boolean
+          updated_at: string
+        }
+        Insert: {
+          id?: boolean
+          referrer_reward?: number
+          welcome_bonus?: number
+          min_qualifying_amount?: number
+          max_rewards_per_referrer?: number | null
+          enabled?: boolean
+          updated_at?: string
+        }
+        Update: {
+          referrer_reward?: number
+          welcome_bonus?: number
+          min_qualifying_amount?: number
+          max_rewards_per_referrer?: number | null
+          enabled?: boolean
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      referrals: {
+        Row: {
+          id: string
+          referrer_id: string
+          referred_id: string
+          code_used: string | null
+          status: string
+          qualifying_deal_id: string | null
+          referrer_reward_amount: number | null
+          referred_reward_amount: number | null
+          admin_notes: string | null
+          created_at: string
+          qualified_at: string | null
+          reversed_at: string | null
+        }
+        Insert: {
+          id?: string
+          referrer_id: string
+          referred_id: string
+          code_used?: string | null
+          status?: string
+          qualifying_deal_id?: string | null
+          referrer_reward_amount?: number | null
+          referred_reward_amount?: number | null
+          admin_notes?: string | null
+        }
+        Update: {
+          status?: string
+          admin_notes?: string | null
         }
         Relationships: []
       }
@@ -555,7 +702,7 @@ export type Database = {
     }
     Functions: {
       accept_deal: {
-        Args: { p_deal_id: string; p_delivery_address: string }
+        Args: { p_deal_id: string; p_delivery_address?: string | null }
         Returns: {
           admin_contact_number: string | null
           admin_notes: string | null
@@ -614,6 +761,10 @@ export type Database = {
       }
       complete_deal_escrow: { Args: { p_deal_id: string }; Returns: undefined }
       complete_deal: { Args: { p_deal_id: string }; Returns: undefined }
+      cancel_deal: {
+        Args: { p_deal_id: string }
+        Returns: Database["public"]["Tables"]["deals"]["Row"]
+      }
       place_deal_order: {
         Args: {
           p_deal_id: string
@@ -701,6 +852,27 @@ export type Database = {
         Args: { p_request_id: string }
         Returns: Database["public"]["Tables"]["withdrawal_requests"]["Row"]
       }
+      reject_withdrawal: {
+        Args: { p_request_id: string; p_notes?: string | null }
+        Returns: Database["public"]["Tables"]["withdrawal_requests"]["Row"]
+      }
+      list_kycs_for_admin: {
+        Args: Record<string, never>
+        Returns: {
+          id: string
+          user_id: string
+          full_name: string
+          email: string
+          pan_number: string
+          document_url: string
+          bank_name: string
+          account_number: string
+          ifsc_code: string
+          status: string
+          admin_notes: string | null
+          created_at: string
+        }[]
+      }
       grant_admin_role: {
         Args: { p_email: string }
         Returns: Database["public"]["Tables"]["user_roles"]["Row"]
@@ -727,6 +899,94 @@ export type Database = {
         Returns: boolean
       }
       is_admin: { Args: { _user_id: string }; Returns: boolean }
+      is_verified: { Args: Record<string, never>; Returns: boolean }
+      apply_referral_code: { Args: { p_code: string }; Returns: Json }
+      get_my_referral_summary: { Args: Record<string, never>; Returns: Json }
+      list_my_referrals: {
+        Args: Record<string, never>
+        Returns: {
+          id: string
+          referred_name: string
+          status: string
+          reward_amount: number | null
+          created_at: string
+          qualified_at: string | null
+        }[]
+      }
+      admin_update_referral_config: {
+        Args: {
+          p_referrer_reward: number
+          p_welcome_bonus: number
+          p_min_qualifying_amount: number
+          p_max_rewards_per_referrer: number | null
+          p_enabled: boolean
+        }
+        Returns: Database["public"]["Tables"]["referral_config"]["Row"]
+      }
+      admin_list_referrals: {
+        Args: { p_status?: string | null }
+        Returns: {
+          id: string
+          referrer_name: string
+          referrer_email: string
+          referred_name: string
+          referred_email: string
+          code_used: string | null
+          status: string
+          referrer_reward_amount: number | null
+          referred_reward_amount: number | null
+          qualifying_deal_id: string | null
+          admin_notes: string | null
+          created_at: string
+          qualified_at: string | null
+        }[]
+      }
+      admin_void_referral: {
+        Args: { p_id: string; p_notes?: string | null }
+        Returns: Database["public"]["Tables"]["referrals"]["Row"]
+      }
+      add_tracked_product: {
+        Args: {
+          p_url: string
+          p_platform: string
+          p_product_name: string
+          p_image_url?: string | null
+          p_current_price?: number | null
+          p_original_price?: number | null
+          p_currency?: string
+          p_external_id?: string | null
+          p_availability?: string | null
+          p_seller?: string | null
+          p_target_price?: number | null
+          p_source?: string
+        }
+        Returns: Database["public"]["Tables"]["tracked_products"]["Row"]
+      }
+      log_product_price: {
+        Args: {
+          p_product_id: string
+          p_price: number
+          p_original_price?: number | null
+          p_availability?: string | null
+          p_source?: string
+        }
+        Returns: Database["public"]["Tables"]["tracked_products"]["Row"]
+      }
+      get_product_stats: {
+        Args: { p_product_id: string }
+        Returns: {
+          points: number
+          current_price: number | null
+          lowest: number | null
+          highest: number | null
+          average: number | null
+          first_price: number | null
+          previous_price: number | null
+          recommendation: string
+          pct_from_low: number
+          recent_change: number
+        }[]
+      }
       reject_deal: {
         Args: { deal_id: string; rejection_notes?: string }
         Returns: {

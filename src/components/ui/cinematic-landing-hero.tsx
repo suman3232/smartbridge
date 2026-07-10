@@ -177,6 +177,13 @@ export function CinematicHero({
   const containerRef = useRef<HTMLDivElement>(null);
   const mockupRef = useRef<HTMLDivElement>(null);
   const requestRef = useRef<number>(0);
+  // Keep the latest metric in a ref so the GSAP timeline can read it via
+  // function-based values without being torn down and rebuilt when the async
+  // open-deals count arrives.
+  const displayMetricRef = useRef(displayMetric);
+  useEffect(() => {
+    displayMetricRef.current = displayMetric;
+  }, [displayMetric]);
 
   useEffect(() => {
     const finePointer = window.matchMedia("(pointer: fine)").matches;
@@ -214,7 +221,11 @@ export function CinematicHero({
   useEffect(() => {
     const ctx = gsap.context(() => {
       const scrollEnd = window.innerWidth < 768 ? 1000 : 1500;
-      const ringOffset = displayMetric > 0 ? Math.max(60, 402 - (displayMetric / 50) * 340) : 340;
+      // Function-based values so they resolve to the latest count at tween time.
+      const ringOffset = () => {
+        const m = displayMetricRef.current;
+        return m > 0 ? Math.max(60, 402 - (m / 50) * 340) : 340;
+      };
 
       gsap.set(".text-track", { autoAlpha: 0, y: 50, scale: 0.9, filter: "blur(12px)" });
       gsap.set(".text-days", { autoAlpha: 1, clipPath: "inset(0 100% 0 0)" });
@@ -279,7 +290,7 @@ export function CinematicHero({
         .to(".progress-ring", { strokeDashoffset: ringOffset, duration: 0.5, ease: "power3.inOut" }, 0.14)
         .to(
           ".counter-val",
-          { innerHTML: displayMetric, snap: { innerHTML: 1 }, duration: 0.5, ease: "expo.out" },
+          { innerHTML: () => displayMetricRef.current, snap: { innerHTML: 1 }, duration: 0.5, ease: "expo.out" },
           0.14,
         )
         .to(
@@ -308,7 +319,9 @@ export function CinematicHero({
     }, containerRef);
 
     return () => ctx.revert();
-  }, [displayMetric]);
+    // Built once on mount; the counter/ring read live values via refs above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div

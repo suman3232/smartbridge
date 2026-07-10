@@ -50,21 +50,11 @@ export default function Landing() {
 
   useEffect(() => {
     const fetchOpenDeals = async () => {
+      // list_open_deals is SECURITY DEFINER, so it works for anonymous visitors
+      // even though the deals base table is participant-only under RLS.
       const { data, error } = await supabase.rpc("list_open_deals");
-
       if (!error && data) {
         setOpenDealsCount(data.length);
-        return;
-      }
-
-      const { count, error: fallbackError } = await supabase
-        .from("deals")
-        .select("*", { count: "exact", head: true })
-        .eq("status", "approved")
-        .is("customer_id", null);
-
-      if (!fallbackError && count !== null) {
-        setOpenDealsCount(count);
       }
     };
 

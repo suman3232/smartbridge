@@ -59,9 +59,9 @@ export function AcceptDealDialog({ deal, open, onOpenChange, onSuccess }: Accept
 
     setLoading(true);
 
+    // Delivery address is taken from the deal server-side; not sent by the client.
     const { data, error } = await supabase.rpc("accept_deal", {
       p_deal_id: preview.id,
-      p_delivery_address: preview.delivery_address,
     });
 
     setLoading(false);
