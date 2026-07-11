@@ -431,7 +431,14 @@ export default function AdminPanel() {
     const { error } = await supabase.rpc("admin_update_support_number", { p_number: supportNumber.trim() });
     setSavingSupport(false);
     if (error) {
-      toast({ title: "Error", description: error.message, variant: "destructive" });
+      const missing = /schema cache|could not find the function/i.test(error.message);
+      toast({
+        title: missing ? "Backend not updated yet" : "Error",
+        description: missing
+          ? "Re-run the latest supabase/setup.sql to enable saving here. The support button already works via a built-in number in the meantime."
+          : error.message,
+        variant: "destructive",
+      });
     } else {
       clearSupportWhatsAppCache();
       toast({

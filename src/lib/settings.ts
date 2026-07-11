@@ -13,6 +13,10 @@ let inflight: Promise<string | null> | null = null;
 const ENV_FALLBACK: string | null =
   ((import.meta.env.VITE_SUPPORT_WHATSAPP as string | undefined) ?? "").trim() || null;
 
+// Built-in default so the support button works even before the admin panel or
+// env are configured. A saved DB value or VITE_SUPPORT_WHATSAPP overrides this.
+const DEFAULT_SUPPORT_WHATSAPP = "+91 74397 25713";
+
 export async function getSupportWhatsApp(): Promise<string | null> {
   if (cache !== undefined) return cache;
   if (!inflight) {
@@ -22,11 +26,11 @@ export async function getSupportWhatsApp(): Promise<string | null> {
       .eq("id", true)
       .maybeSingle()
       .then(({ data }) => {
-        cache = data?.support_whatsapp ?? ENV_FALLBACK;
+        cache = data?.support_whatsapp ?? ENV_FALLBACK ?? DEFAULT_SUPPORT_WHATSAPP;
         return cache;
       })
       .catch(() => {
-        cache = ENV_FALLBACK;
+        cache = ENV_FALLBACK ?? DEFAULT_SUPPORT_WHATSAPP;
         return cache;
       })
       .finally(() => {
