@@ -123,6 +123,10 @@ CREATE TABLE IF NOT EXISTS public.deals (
   required_card TEXT NOT NULL,
   delivery_address TEXT,
   admin_contact_number TEXT,
+  -- 30-minute reservation window (set on accept, cleared on order/expiry/release).
+  -- reserved_until is the server-side source of truth for the countdown.
+  reserved_at TIMESTAMPTZ,
+  reserved_until TIMESTAMPTZ,
   status public.deal_status DEFAULT 'pending',
   admin_notes TEXT,
   created_at TIMESTAMPTZ DEFAULT now(),
@@ -251,6 +255,56 @@ CREATE TABLE IF NOT EXISTS public.app_settings (
 );
 INSERT INTO public.app_settings (id) VALUES (true) ON CONFLICT (id) DO NOTHING;
 
+-- ---------------------------------------------------------------------------
+-- Deal reservation + cardholder reliability system
+-- ---------------------------------------------------------------------------
+-- Admin-tunable rules for the 30-minute reservation hold (single-row singleton).
+CREATE TABLE IF NOT EXISTS public.reservation_config (
+  id BOOLEAN PRIMARY KEY DEFAULT true CHECK (id),
+  enabled BOOLEAN NOT NULL DEFAULT true,                 -- master switch for strikes/cooldowns
+  hold_seconds INT NOT NULL DEFAULT 1800 CHECK (hold_seconds >= 60),          -- 30 min to submit proof
+  release_grace_seconds INT NOT NULL DEFAULT 300 CHECK (release_grace_seconds >= 0), -- 5 min penalty-free
+  max_accepts_per_deal INT NOT NULL DEFAULT 3 CHECK (max_accepts_per_deal >= 1),     -- anti re-accept/cycling
+  strike_window_days INT NOT NULL DEFAULT 30 CHECK (strike_window_days >= 1),
+  cooldown2_seconds INT NOT NULL DEFAULT 3600 CHECK (cooldown2_seconds >= 0),        -- 1h after 2nd expiry
+  cooldown3_seconds INT NOT NULL DEFAULT 86400 CHECK (cooldown3_seconds >= 0),       -- 24h after 3rd
+  cooldown_abuse_seconds INT NOT NULL DEFAULT 604800 CHECK (cooldown_abuse_seconds >= 0), -- 7d for 4th+
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+INSERT INTO public.reservation_config (id) VALUES (true) ON CONFLICT (id) DO NOTHING;
+
+-- Immutable audit trail of every reservation lifecycle event.
+CREATE TABLE IF NOT EXISTS public.reservation_events (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  deal_id UUID REFERENCES public.deals(id) ON DELETE SET NULL,
+  user_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE,
+  event_type TEXT NOT NULL CHECK (event_type IN ('reserved','fulfilled','released','expired','admin_reopened')),
+  within_grace BOOLEAN,
+  reserved_at TIMESTAMPTZ,
+  reserved_until TIMESTAMPTZ,
+  detail TEXT,
+  -- Set by admin_reset_cardholder: the event stays in the audit trail but no
+  -- longer counts toward strike escalation.
+  voided BOOLEAN NOT NULL DEFAULT false,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS reservation_events_user_idx ON public.reservation_events (user_id, event_type, created_at DESC);
+CREATE INDEX IF NOT EXISTS reservation_events_deal_idx ON public.reservation_events (deal_id, created_at DESC);
+
+-- Per-cardholder reliability state (strikes, cooldowns, releases). Written only
+-- by the reservation RPCs / admin overrides.
+CREATE TABLE IF NOT EXISTS public.cardholder_reliability (
+  user_id UUID PRIMARY KEY REFERENCES public.profiles(id) ON DELETE CASCADE,
+  total_expiries INT NOT NULL DEFAULT 0,
+  total_releases INT NOT NULL DEFAULT 0,
+  strikes_30d INT NOT NULL DEFAULT 0,            -- expiries within the strike window (denormalized)
+  acceptance_blocked_until TIMESTAMPTZ,          -- cooldown end; NULL = can accept now
+  last_expiry_at TIMESTAMPTZ,
+  under_review BOOLEAN NOT NULL DEFAULT false,   -- flagged for repeated abuse
+  admin_note TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- One referral per referred user, ever. Reward fires only on qualification.
 CREATE TABLE IF NOT EXISTS public.referrals (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -304,6 +358,8 @@ ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS remaining_amount DECIMAL(10,2)
 ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS commission_amount DECIMAL(10,2);
 ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS delivery_address TEXT;
 ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS admin_contact_number TEXT;
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS reserved_at TIMESTAMPTZ;
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS reserved_until TIMESTAMPTZ;
 ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS status public.deal_status DEFAULT 'pending';
 ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS admin_notes TEXT;
 ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now();
@@ -363,6 +419,8 @@ ALTER TABLE public.referrals ADD COLUMN IF NOT EXISTS reversed_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS deals_merchant_idx ON public.deals (merchant_id);
 CREATE INDEX IF NOT EXISTS deals_customer_idx ON public.deals (customer_id);
 CREATE INDEX IF NOT EXISTS deals_open_idx ON public.deals (created_at DESC) WHERE status = 'approved' AND customer_id IS NULL;
+-- Supports the expire_stale_reservations sweep (status='accepted' AND reserved_until < now()).
+CREATE INDEX IF NOT EXISTS deals_reserved_sweep_idx ON public.deals (reserved_until) WHERE status = 'accepted';
 CREATE INDEX IF NOT EXISTS notifications_user_idx ON public.notifications (user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS payments_from_idx ON public.payments (from_user_id);
 CREATE INDEX IF NOT EXISTS payments_to_idx ON public.payments (to_user_id);
@@ -388,6 +446,9 @@ ALTER TABLE public.otp_records           ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.referral_config       ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.referrals             ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.app_settings          ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.reservation_config     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.reservation_events     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.cardholder_reliability ENABLE ROW LEVEL SECURITY;
 
 -- ---------------------------------------------------------------------------
 -- Core security-definer helpers (needed by policies below)
@@ -633,6 +694,26 @@ DROP POLICY IF EXISTS "Admins manage app settings" ON public.app_settings;
 CREATE POLICY "Admins manage app settings" ON public.app_settings
   FOR ALL USING (public.is_admin(auth.uid()));
 
+-- reservation_config: readable by any signed-in user (frontend shows the window);
+-- writes only via admin_update_reservation_config.
+DROP POLICY IF EXISTS "Anyone signed in can read reservation config" ON public.reservation_config;
+CREATE POLICY "Anyone signed in can read reservation config" ON public.reservation_config
+  FOR SELECT TO authenticated USING (true);
+DROP POLICY IF EXISTS "Admins manage reservation config" ON public.reservation_config;
+CREATE POLICY "Admins manage reservation config" ON public.reservation_config
+  FOR ALL USING (public.is_admin(auth.uid()));
+
+-- reservation_events: a user sees their own events; admins see all. No client
+-- writes — rows are inserted only by SECURITY DEFINER reservation RPCs.
+DROP POLICY IF EXISTS "Own or admin reservation events" ON public.reservation_events;
+CREATE POLICY "Own or admin reservation events" ON public.reservation_events
+  FOR SELECT USING (user_id = auth.uid() OR public.is_admin(auth.uid()));
+
+-- cardholder_reliability: a user sees their own row; admins see all. No client writes.
+DROP POLICY IF EXISTS "Own or admin reliability" ON public.cardholder_reliability;
+CREATE POLICY "Own or admin reliability" ON public.cardholder_reliability
+  FOR SELECT USING (user_id = auth.uid() OR public.is_admin(auth.uid()));
+
 -- ---------------------------------------------------------------------------
 -- Utility + signup trigger functions
 -- ---------------------------------------------------------------------------
@@ -694,6 +775,9 @@ BEGIN
   RETURN selected_number;
 END;
 $$;
+-- SECURITY: only approve_deal (SECURITY DEFINER, runs as owner) should rotate the
+-- pool; direct client calls would skew the round-robin counters.
+REVOKE EXECUTE ON FUNCTION public.get_next_admin_number() FROM PUBLIC, anon, authenticated;
 
 -- ---------------------------------------------------------------------------
 -- Deal lifecycle: approve / reject / accept / place order / complete
@@ -763,33 +847,95 @@ RETURNS public.deals LANGUAGE plpgsql SECURITY DEFINER SET search_path = public 
 DECLARE
   updated_deal public.deals;
   existing_address TEXT;
+  deal_merchant UUID;
+  cfg public.reservation_config;
+  blocked_until TIMESTAMPTZ;
+  accept_count INT;
+  hold INT;
 BEGIN
   IF NOT public.is_verified() THEN
     RAISE EXCEPTION 'Please verify your email before accepting deals';
   END IF;
 
-  SELECT delivery_address INTO existing_address FROM public.deals WHERE id = p_deal_id;
+  SELECT * INTO cfg FROM public.reservation_config WHERE id = true;
+  hold := COALESCE(cfg.hold_seconds, 1800);
 
+  -- Serialize THIS user's accepts (transaction-scoped advisory lock) so two
+  -- parallel calls from the same account cannot slip past the checks below.
+  PERFORM pg_advisory_xact_lock(hashtext('accept_deal:' || auth.uid()::text));
+
+  IF COALESCE(cfg.enabled, true) THEN
+    -- Acceptance cooldown (escalating penalty for missed reservations).
+    SELECT acceptance_blocked_until INTO blocked_until FROM public.cardholder_reliability WHERE user_id = auth.uid();
+    IF blocked_until IS NOT NULL AND blocked_until > now() THEN
+      RAISE EXCEPTION 'You are on a % acceptance cooldown after missed reservations. Try again after %.',
+        (SELECT CASE WHEN blocked_until - now() > interval '1 hour'
+                     THEN CEIL(EXTRACT(EPOCH FROM (blocked_until - now())) / 3600) || 'h'
+                     ELSE CEIL(EXTRACT(EPOCH FROM (blocked_until - now())) / 60) || 'm' END),
+        to_char(blocked_until, 'DD Mon HH24:MI');
+    END IF;
+
+    -- One active reservation at a time: a holder must finish or release the deal
+    -- they are on before locking up another one (blocks multi-deal squatting).
+    IF EXISTS (
+      SELECT 1 FROM public.deals a
+      WHERE a.customer_id = auth.uid() AND a.status = 'accepted'
+        AND a.reserved_until IS NOT NULL AND a.reserved_until > now() AND a.id != p_deal_id
+    ) THEN
+      RAISE EXCEPTION 'Finish or release your current reservation before accepting another deal';
+    END IF;
+
+    -- Anti-abuse: cap how many times ONE user may reserve the SAME deal, so a user
+    -- cannot cycle accept/release to keep a deal blocked from everyone else.
+    SELECT COUNT(*) INTO accept_count FROM public.reservation_events
+    WHERE deal_id = p_deal_id AND user_id = auth.uid() AND event_type = 'reserved';
+    IF accept_count >= COALESCE(cfg.max_accepts_per_deal, 3) THEN
+      RAISE EXCEPTION 'You have reserved this deal the maximum number of times. Please let another card holder take it.';
+    END IF;
+  END IF;
+
+  SELECT delivery_address, merchant_id INTO existing_address, deal_merchant
+  FROM public.deals WHERE id = p_deal_id;
   IF existing_address IS NULL OR TRIM(existing_address) = '' THEN
     RAISE EXCEPTION 'Delivery address is required on the deal before acceptance';
   END IF;
+  -- Reject own-deal accepts BEFORE the expiry below: otherwise a merchant hitting
+  -- accept on their own deal (carrying someone else's lapsed hold) would trip the
+  -- claim guard and roll the just-persisted expiry back.
+  IF deal_merchant = auth.uid() THEN
+    RAISE EXCEPTION 'You cannot accept your own deal';
+  END IF;
 
+  -- Expire a prior holder's lapsed reservation ONLY now that every guard above
+  -- has passed: any earlier RAISE would roll the expiry (strike, audit event,
+  -- notifications) back in this same transaction. The FOR UPDATE inside
+  -- expire_reservation also row-locks the deal for the rest of this transaction,
+  -- so the claim below cannot lose a race after we expired the old hold — a
+  -- losing concurrent accepter blocks on the lock and its own expiry is a no-op.
+  PERFORM public.expire_reservation(p_deal_id);
+
+  -- Atomic claim + reservation window. The WHERE clause guarantees exactly one
+  -- winner under concurrent acceptance (second caller sees customer_id already set).
   UPDATE public.deals
-  SET status = 'accepted', customer_id = auth.uid(), updated_at = now()
+  SET status = 'accepted', customer_id = auth.uid(),
+      reserved_at = now(), reserved_until = now() + make_interval(secs => hold), updated_at = now()
   WHERE id = p_deal_id AND status = 'approved' AND customer_id IS NULL AND merchant_id != auth.uid()
   RETURNING * INTO updated_deal;
 
   IF updated_deal IS NULL THEN
-    RAISE EXCEPTION 'Deal not found, not approved, already accepted, or you cannot accept your own deal';
+    RAISE EXCEPTION 'Deal not found, not approved, already reserved by someone, or you cannot accept your own deal';
   END IF;
 
-  INSERT INTO public.notifications (user_id, title, message, type, link)
-  VALUES (updated_deal.merchant_id, 'Deal Accepted',
-    'A card holder accepted your deal for "' || updated_deal.product_name || '".', 'info', '/deals/' || p_deal_id);
+  INSERT INTO public.reservation_events (deal_id, user_id, event_type, reserved_at, reserved_until)
+  VALUES (p_deal_id, auth.uid(), 'reserved', updated_deal.reserved_at, updated_deal.reserved_until);
 
   INSERT INTO public.notifications (user_id, title, message, type, link)
-  VALUES (updated_deal.customer_id, 'Deal Accepted',
-    'Place the order on the e-commerce site using your card. Ship to the shopper address shown in the deal.',
+  VALUES (updated_deal.merchant_id, 'Deal Reserved',
+    'A card holder reserved your deal for "' || updated_deal.product_name || '" and has ' || (hold / 60) || ' minutes to place the order.', 'info', '/deals/' || p_deal_id);
+
+  INSERT INTO public.notifications (user_id, title, message, type, link)
+  VALUES (updated_deal.customer_id, 'Deal Reserved',
+    'Reserved for you. Place the order using your card and submit proof before the timer runs out, or release it if you can''t.',
     'info', '/deals/' || p_deal_id);
 
   RETURN updated_deal;
@@ -806,13 +952,29 @@ BEGIN
   IF NOT public.is_verified() THEN
     RAISE EXCEPTION 'Please verify your email before placing an order';
   END IF;
-  SELECT * INTO deal_record FROM public.deals WHERE id = p_deal_id;
+
+  -- Valid initial proof is required: at least a tracking id or an order screenshot.
+  -- This rejects empty "fake" submissions made only to stop the timer.
+  IF NULLIF(TRIM(COALESCE(p_tracking_id, '')), '') IS NULL
+     AND NULLIF(TRIM(COALESCE(p_order_screenshot_url, '')), '') IS NULL THEN
+    RAISE EXCEPTION 'Add a tracking ID or an order screenshot as proof before submitting';
+  END IF;
+
+  SELECT * INTO deal_record FROM public.deals WHERE id = p_deal_id FOR UPDATE;
   IF deal_record IS NULL THEN RAISE EXCEPTION 'Deal not found'; END IF;
   IF deal_record.customer_id != auth.uid() THEN
-    RAISE EXCEPTION 'Only the card holder who accepted this deal can place the order';
+    RAISE EXCEPTION 'Only the card holder who reserved this deal can place the order';
+  END IF;
+  -- Server-side timer: a lapsed window rejects the proof. The expiry itself is
+  -- deliberately NOT performed here — this RAISE would roll it back in the same
+  -- transaction. It is persisted by the sweeps (browse feed, new accepts, and
+  -- the client's countdown/error handlers calling expire_stale_reservations).
+  IF deal_record.status = 'accepted' AND deal_record.reserved_until IS NOT NULL
+     AND deal_record.reserved_until < now() THEN
+    RAISE EXCEPTION 'Your reservation window has expired. The deal is reopening for other card holders.';
   END IF;
   IF deal_record.status != 'accepted' THEN
-    RAISE EXCEPTION 'Deal must be accepted before placing an order';
+    RAISE EXCEPTION 'Your reservation is no longer active. The deal must be reserved before placing an order.';
   END IF;
   IF EXISTS (SELECT 1 FROM public.orders WHERE deal_id = p_deal_id) THEN
     RAISE EXCEPTION 'Order already placed for this deal';
@@ -822,7 +984,12 @@ BEGIN
   VALUES (p_deal_id, auth.uid(), NULLIF(TRIM(p_tracking_id), ''), NULLIF(TRIM(p_order_screenshot_url), ''), 'placed')
   RETURNING * INTO new_order;
 
-  UPDATE public.deals SET status = 'in_progress', updated_at = now() WHERE id = p_deal_id;
+  -- Advance the lifecycle and stop the reservation countdown.
+  UPDATE public.deals SET status = 'in_progress', reserved_at = NULL, reserved_until = NULL, updated_at = now()
+  WHERE id = p_deal_id;
+
+  INSERT INTO public.reservation_events (deal_id, user_id, event_type, reserved_at, reserved_until, detail)
+  VALUES (p_deal_id, auth.uid(), 'fulfilled', deal_record.reserved_at, deal_record.reserved_until, 'Order proof submitted within the window');
 
   INSERT INTO public.notifications (user_id, title, message, type, link)
   VALUES (deal_record.merchant_id, 'Order Placed',
@@ -897,6 +1064,11 @@ BEGIN
 END;
 $$;
 
+-- SECURITY: maybe_qualify_referral must only run inside complete_deal. If clients
+-- could call it directly they could pass an arbitrary p_deal_value and trigger
+-- their own referral reward without completing a real deal.
+REVOKE EXECUTE ON FUNCTION public.maybe_qualify_referral(UUID, UUID, DECIMAL) FROM PUBLIC, anon, authenticated;
+
 -- Admin-mediated completion: credit reimbursement + commission to the card
 -- holder's wallet and record both ledger legs (shopper outflow + card holder inflow).
 CREATE OR REPLACE FUNCTION public.complete_deal(p_deal_id UUID)
@@ -966,10 +1138,217 @@ BEGIN
     RAISE EXCEPTION 'Only a pending or approved deal that has not been accepted can be cancelled';
   END IF;
 
+  -- Status-guarded UPDATE closes the TOCTOU window: if an accept_deal lands between
+  -- the read above and here, the guard fails instead of clobbering the reservation.
   UPDATE public.deals SET status = 'cancelled', updated_at = now()
-  WHERE id = p_deal_id RETURNING * INTO updated_deal;
+  WHERE id = p_deal_id AND status IN ('pending', 'approved')
+  RETURNING * INTO updated_deal;
+
+  IF updated_deal IS NULL THEN
+    RAISE EXCEPTION 'This deal can no longer be cancelled (it may have just been reserved).';
+  END IF;
 
   RETURN updated_deal;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Reservation expiry / voluntary release
+-- ---------------------------------------------------------------------------
+-- Shared escalation. A "strike" = an expired reservation OR a voluntary release
+-- AFTER the grace window (the caller logs the event first, then calls this).
+-- 1st strike in the window: warning; 2nd: 1h cooldown; 3rd: 24h; 4th+: 7d + review.
+-- Internal only — EXECUTE is revoked from clients below; SECURITY DEFINER callers
+-- (expire_reservation / release_deal) still run it as the function owner.
+CREATE OR REPLACE FUNCTION public.apply_reliability_strike(p_user_id UUID, p_deal_id UUID, p_product_name TEXT)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  cfg public.reservation_config;
+  n_strikes INT;
+  cd_seconds INT;
+  new_block TIMESTAMPTZ;
+BEGIN
+  SELECT * INTO cfg FROM public.reservation_config WHERE id = true;
+  IF NOT COALESCE(cfg.enabled, true) THEN RETURN; END IF;
+
+  SELECT COUNT(*) INTO n_strikes FROM public.reservation_events
+  WHERE user_id = p_user_id
+    AND (event_type = 'expired' OR (event_type = 'released' AND within_grace = false))
+    AND NOT voided  -- admin-forgiven strikes restart escalation from the warning tier
+    AND created_at > now() - make_interval(days => COALESCE(cfg.strike_window_days, 30));
+
+  cd_seconds := CASE
+    WHEN n_strikes <= 1 THEN 0                                       -- 1st: warning only
+    WHEN n_strikes = 2 THEN COALESCE(cfg.cooldown2_seconds, 3600)    -- 2nd: 1h
+    WHEN n_strikes = 3 THEN COALESCE(cfg.cooldown3_seconds, 86400)   -- 3rd: 24h
+    ELSE COALESCE(cfg.cooldown_abuse_seconds, 604800)                -- 4th+: 7d + admin review
+  END;
+  new_block := CASE WHEN cd_seconds > 0 THEN now() + make_interval(secs => cd_seconds) ELSE NULL END;
+
+  INSERT INTO public.cardholder_reliability (user_id, strikes_30d, acceptance_blocked_until, under_review, updated_at)
+  VALUES (p_user_id, n_strikes, new_block, (n_strikes >= 4), now())
+  ON CONFLICT (user_id) DO UPDATE SET
+    strikes_30d = EXCLUDED.strikes_30d,
+    -- extend the cooldown, never shorten an existing one (GREATEST ignores NULLs)
+    acceptance_blocked_until = GREATEST(public.cardholder_reliability.acceptance_blocked_until, EXCLUDED.acceptance_blocked_until),
+    under_review = public.cardholder_reliability.under_review OR EXCLUDED.under_review,
+    updated_at = now();
+
+  INSERT INTO public.notifications (user_id, title, message, type, link)
+  VALUES (p_user_id, 'Reservation missed',
+    CASE WHEN cd_seconds > 0
+      THEN 'You missed the window for "' || p_product_name || '". Accepting new deals is paused until ' || to_char(new_block, 'DD Mon HH24:MI') || '.'
+      ELSE 'You missed the window for "' || p_product_name || '". This is a warning — repeated misses pause your ability to accept deals.'
+    END,
+    'error', '/deals/' || p_deal_id);
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.apply_reliability_strike(UUID, UUID, TEXT) FROM PUBLIC, anon, authenticated;
+
+-- Expire ONE deal's reservation if the 30-minute window lapsed with no order.
+-- Atomic + idempotent: only a stale 'accepted' deal with no order is reopened,
+-- and the strike is applied exactly once. Safe to call from anyone (it only ever
+-- acts on genuinely-expired reservations). Returns true if it expired one.
+CREATE OR REPLACE FUNCTION public.expire_reservation(p_deal_id UUID)
+RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  d public.deals;
+  cfg public.reservation_config;
+BEGIN
+  SELECT * INTO cfg FROM public.reservation_config WHERE id = true;
+
+  -- Lock the row, then re-check under the lock (avoids two callers double-striking).
+  SELECT * INTO d FROM public.deals WHERE id = p_deal_id FOR UPDATE;
+  IF d IS NULL OR d.status != 'accepted' OR d.reserved_until IS NULL OR d.reserved_until >= now() THEN
+    RETURN false;
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.orders WHERE deal_id = p_deal_id) THEN
+    RETURN false; -- order already placed; nothing to expire
+  END IF;
+
+  UPDATE public.deals
+  SET status = 'approved', customer_id = NULL, reserved_at = NULL, reserved_until = NULL, updated_at = now()
+  WHERE id = p_deal_id;
+
+  INSERT INTO public.reservation_events (deal_id, user_id, event_type, reserved_at, reserved_until, detail)
+  VALUES (p_deal_id, d.customer_id, 'expired', d.reserved_at, d.reserved_until, 'Reservation expired without order proof');
+
+  -- Notify the shopper the deal reopened regardless of the punitive switch.
+  INSERT INTO public.notifications (user_id, title, message, type, link)
+  VALUES (d.merchant_id, 'Deal reopened',
+    'The reservation on "' || d.product_name || '" expired; your deal is open again.', 'info', '/deals/' || p_deal_id);
+
+  -- Track lifetime expiries; strikes/cooldowns/notification are applied by the
+  -- shared helper (it counts the 'expired' event logged above).
+  INSERT INTO public.cardholder_reliability (user_id, total_expiries, last_expiry_at, updated_at)
+  VALUES (d.customer_id, 1, now(), now())
+  ON CONFLICT (user_id) DO UPDATE SET
+    total_expiries = public.cardholder_reliability.total_expiries + 1,
+    last_expiry_at = now(), updated_at = now();
+
+  PERFORM public.apply_reliability_strike(d.customer_id, p_deal_id, d.product_name);
+
+  RETURN true;
+END;
+$$;
+
+-- Sweep all lapsed reservations. Called lazily from list_open_deals, accept_deal,
+-- place_deal_order and the client's countdown-zero handler, so expiry needs no
+-- background job. Optional belt-and-suspenders (requires the pg_cron extension):
+--   SELECT cron.schedule('expire-stale-reservations', '* * * * *',
+--     $CRON$SELECT public.expire_stale_reservations()$CRON$);
+CREATE OR REPLACE FUNCTION public.expire_stale_reservations()
+RETURNS INT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE r RECORD; n INT := 0;
+BEGIN
+  FOR r IN
+    SELECT id FROM public.deals
+    WHERE status = 'accepted' AND reserved_until IS NOT NULL AND reserved_until < now()
+  LOOP
+    IF public.expire_reservation(r.id) THEN n := n + 1; END IF;
+  END LOOP;
+  RETURN n;
+END;
+$$;
+
+-- Voluntary release by the current holder (no strike). Within the grace window it
+-- is explicitly penalty-free; each acceptance still counts toward the per-deal cap
+-- so a user cannot cycle accept/release to keep a deal blocked.
+CREATE OR REPLACE FUNCTION public.release_deal(p_deal_id UUID)
+RETURNS public.deals LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  d public.deals;
+  released public.deals;
+  cfg public.reservation_config;
+  grace_ok BOOLEAN;
+BEGIN
+  SELECT * INTO cfg FROM public.reservation_config WHERE id = true;
+  SELECT * INTO d FROM public.deals WHERE id = p_deal_id FOR UPDATE;
+  IF d IS NULL THEN RAISE EXCEPTION 'Deal not found'; END IF;
+  IF d.customer_id != auth.uid() THEN
+    RAISE EXCEPTION 'Only the card holder holding this reservation can release it';
+  END IF;
+  IF d.status != 'accepted' THEN
+    RAISE EXCEPTION 'This deal is not currently reserved by you';
+  END IF;
+  IF EXISTS (SELECT 1 FROM public.orders WHERE deal_id = p_deal_id) THEN
+    RAISE EXCEPTION 'You already placed the order for this deal; it cannot be released';
+  END IF;
+
+  -- Legacy holds (accepted before the reservation system existed; reserved_at is
+  -- NULL) never had a timer, so releasing them is always penalty-free.
+  grace_ok := d.reserved_at IS NULL
+    OR now() <= d.reserved_at + make_interval(secs => COALESCE(cfg.release_grace_seconds, 300));
+
+  UPDATE public.deals
+  SET status = 'approved', customer_id = NULL, reserved_at = NULL, reserved_until = NULL, updated_at = now()
+  WHERE id = p_deal_id AND status = 'accepted' AND customer_id = auth.uid()
+  RETURNING * INTO released;
+  IF released IS NULL THEN
+    RAISE EXCEPTION 'Could not release the deal — it may have just expired or changed.';
+  END IF;
+
+  INSERT INTO public.reservation_events (deal_id, user_id, event_type, within_grace, reserved_at, reserved_until, detail)
+  VALUES (p_deal_id, auth.uid(), 'released', grace_ok, d.reserved_at, d.reserved_until,
+    CASE WHEN grace_ok THEN 'Voluntary release within grace window (penalty-free)'
+         ELSE 'Voluntary release after grace window (counts as a missed reservation)' END);
+
+  INSERT INTO public.cardholder_reliability (user_id, total_releases, updated_at)
+  VALUES (auth.uid(), 1, now())
+  ON CONFLICT (user_id) DO UPDATE SET
+    total_releases = public.cardholder_reliability.total_releases + 1, updated_at = now();
+
+  -- Releasing after the grace window counts toward strikes (otherwise a user
+  -- could hold deals for the full window and release at no cost). Within the
+  -- grace window it is entirely penalty-free.
+  IF NOT grace_ok THEN
+    PERFORM public.apply_reliability_strike(auth.uid(), p_deal_id, d.product_name);
+  END IF;
+
+  INSERT INTO public.notifications (user_id, title, message, type, link)
+  VALUES (d.merchant_id, 'Deal reopened',
+    'The card holder released "' || d.product_name || '"; your deal is open again.', 'info', '/deals/' || p_deal_id);
+
+  RETURN released;
+END;
+$$;
+
+-- The caller's live reservation + cooldown state (for browse banners / gating).
+CREATE OR REPLACE FUNCTION public.get_my_reservation_status()
+RETURNS TABLE (
+  active_deal_id UUID, active_product_name TEXT, active_reserved_until TIMESTAMPTZ,
+  blocked_until TIMESTAMPTZ, strikes_30d INT, under_review BOOLEAN, server_now TIMESTAMPTZ
+) LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF auth.uid() IS NULL THEN RETURN; END IF;
+  RETURN QUERY
+  SELECT d.id, d.product_name, d.reserved_until,
+         rel.acceptance_blocked_until, COALESCE(rel.strikes_30d, 0), COALESCE(rel.under_review, false), now()
+  FROM (SELECT 1) one
+  LEFT JOIN public.deals d
+    ON d.customer_id = auth.uid() AND d.status = 'accepted' AND d.reserved_until > now()
+  LEFT JOIN public.cardholder_reliability rel ON rel.user_id = auth.uid()
+  LIMIT 1;
 END;
 $$;
 
@@ -984,14 +1363,25 @@ RETURNS TABLE (
   original_price DECIMAL(10,2), card_offer_price DECIMAL(10,2), expected_buy_price DECIMAL(10,2),
   commission_amount DECIMAL(10,2), required_card TEXT, admin_contact_number TEXT, status TEXT,
   customer_id UUID, advance_amount DECIMAL(10,2), remaining_amount DECIMAL(10,2),
-  created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ
-) LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ,
+  is_reserved BOOLEAN, reserved_until TIMESTAMPTZ, server_now TIMESTAMPTZ
+) LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  -- Reopen any reservations that lapsed so the browse feed is always current.
+  PERFORM public.expire_stale_reservations();
+  RETURN QUERY
   SELECT d.id, d.merchant_id, d.product_name, d.product_link, d.original_price, d.card_offer_price,
     d.expected_buy_price, d.commission_amount, d.required_card, d.admin_contact_number, d.status::TEXT,
-    d.customer_id, d.advance_amount, d.remaining_amount, d.created_at, d.updated_at
+    NULL::UUID,  -- never expose WHO holds a reservation in the public feed
+    d.advance_amount, d.remaining_amount, d.created_at, d.updated_at,
+    (d.status = 'accepted'),
+    CASE WHEN d.status = 'accepted' THEN d.reserved_until ELSE NULL END,
+    now()
   FROM public.deals d
-  WHERE d.status = 'approved' AND d.customer_id IS NULL
-  ORDER BY d.created_at DESC;
+  WHERE (d.status = 'approved' AND d.customer_id IS NULL)
+     OR (d.status = 'accepted' AND d.reserved_until IS NOT NULL AND d.reserved_until > now())
+  ORDER BY (d.status = 'approved' AND d.customer_id IS NULL) DESC, d.created_at DESC;
+END;
 $$;
 
 DROP FUNCTION IF EXISTS public.get_deal_accept_preview(uuid);
@@ -1022,7 +1412,8 @@ RETURNS TABLE (
   original_price DECIMAL(10,2), card_offer_price DECIMAL(10,2), expected_buy_price DECIMAL(10,2),
   advance_amount DECIMAL(10,2), remaining_amount DECIMAL(10,2), commission_amount DECIMAL(10,2),
   required_card TEXT, delivery_address TEXT, admin_contact_number TEXT, status TEXT,
-  admin_notes TEXT, created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ
+  admin_notes TEXT, created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ,
+  reserved_at TIMESTAMPTZ, reserved_until TIMESTAMPTZ, server_now TIMESTAMPTZ
 ) LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
 BEGIN
   IF auth.uid() IS NULL THEN RAISE EXCEPTION 'Sign in to view deal details'; END IF;
@@ -1034,7 +1425,8 @@ BEGIN
       THEN d.delivery_address ELSE NULL END,
     d.admin_contact_number, d.status::TEXT,
     CASE WHEN public.is_admin(auth.uid()) OR d.merchant_id = auth.uid() THEN d.admin_notes ELSE NULL END,
-    d.created_at, d.updated_at
+    d.created_at, d.updated_at,
+    d.reserved_at, d.reserved_until, now()
   FROM public.deals d
   WHERE d.id = p_deal_id AND (
     public.is_admin(auth.uid()) OR d.merchant_id = auth.uid() OR d.customer_id = auth.uid()
@@ -1563,6 +1955,127 @@ BEGIN
   SET support_whatsapp = NULLIF(TRIM(COALESCE(p_number, '')), ''), updated_at = now()
   WHERE id = true RETURNING * INTO row;
   RETURN row;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Admin: reservation visibility, overrides, and config
+-- ---------------------------------------------------------------------------
+-- Reservation history (reserved / fulfilled / released / expired / blocked / admin_reopened).
+DROP FUNCTION IF EXISTS public.admin_list_reservation_events(int);
+CREATE OR REPLACE FUNCTION public.admin_list_reservation_events(p_limit INT DEFAULT 200)
+RETURNS TABLE (
+  id UUID, deal_id UUID, product_name TEXT, user_id UUID, user_name TEXT, user_email TEXT,
+  event_type TEXT, within_grace BOOLEAN, reserved_at TIMESTAMPTZ, reserved_until TIMESTAMPTZ,
+  detail TEXT, voided BOOLEAN, created_at TIMESTAMPTZ
+) LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF NOT public.is_admin(auth.uid()) THEN RAISE EXCEPTION 'Only admins can view reservation history'; END IF;
+  RETURN QUERY
+  SELECT e.id, e.deal_id, d.product_name, e.user_id, p.full_name, p.email,
+         e.event_type, e.within_grace, e.reserved_at, e.reserved_until, e.detail, e.voided, e.created_at
+  FROM public.reservation_events e
+  LEFT JOIN public.deals d ON d.id = e.deal_id
+  LEFT JOIN public.profiles p ON p.id = e.user_id
+  ORDER BY e.created_at DESC
+  LIMIT GREATEST(1, LEAST(COALESCE(p_limit, 200), 1000));
+END;
+$$;
+
+-- Per-cardholder reliability (strikes, cooldowns, releases, review flags).
+DROP FUNCTION IF EXISTS public.admin_list_cardholder_reliability();
+CREATE OR REPLACE FUNCTION public.admin_list_cardholder_reliability()
+RETURNS TABLE (
+  user_id UUID, full_name TEXT, email TEXT, phone TEXT,
+  total_expiries INT, total_releases INT, strikes_30d INT,
+  acceptance_blocked_until TIMESTAMPTZ, last_expiry_at TIMESTAMPTZ, under_review BOOLEAN,
+  admin_note TEXT, server_now TIMESTAMPTZ
+) LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF NOT public.is_admin(auth.uid()) THEN RAISE EXCEPTION 'Only admins can view reliability'; END IF;
+  RETURN QUERY
+  SELECT r.user_id, p.full_name, p.email, p.phone,
+         r.total_expiries, r.total_releases, r.strikes_30d,
+         r.acceptance_blocked_until, r.last_expiry_at, r.under_review, r.admin_note, now()
+  FROM public.cardholder_reliability r
+  LEFT JOIN public.profiles p ON p.id = r.user_id
+  ORDER BY (r.acceptance_blocked_until IS NOT NULL AND r.acceptance_blocked_until > now()) DESC,
+           r.under_review DESC, r.strikes_30d DESC, r.updated_at DESC;
+END;
+$$;
+
+-- Admin override: lift a cardholder's cooldown / clear strikes / review flag.
+CREATE OR REPLACE FUNCTION public.admin_reset_cardholder(p_user_id UUID, p_note TEXT DEFAULT NULL)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF NOT public.is_admin(auth.uid()) THEN RAISE EXCEPTION 'Only admins can reset reliability'; END IF;
+  INSERT INTO public.cardholder_reliability (user_id, acceptance_blocked_until, strikes_30d, under_review, admin_note, updated_at)
+  VALUES (p_user_id, NULL, 0, false, NULLIF(TRIM(COALESCE(p_note, '')), ''), now())
+  ON CONFLICT (user_id) DO UPDATE SET
+    acceptance_blocked_until = NULL, strikes_30d = 0, under_review = false,
+    admin_note = NULLIF(TRIM(COALESCE(p_note, '')), ''), updated_at = now();
+
+  -- Forgive past strikes so the NEXT miss escalates from the warning tier again
+  -- (apply_reliability_strike recounts events — without this, one new miss would
+  -- instantly re-impose the old tier). Audit rows are kept, only marked voided.
+  UPDATE public.reservation_events
+  SET voided = true, detail = COALESCE(detail || ' ', '') || '[forgiven by admin]'
+  WHERE user_id = p_user_id AND voided = false
+    AND (event_type = 'expired' OR (event_type = 'released' AND within_grace = false));
+  INSERT INTO public.notifications (user_id, title, message, type, link)
+  VALUES (p_user_id, 'Cooldown lifted', 'An admin cleared your acceptance cooldown. You can accept deals again.', 'success', '/deals');
+END;
+$$;
+
+-- Admin override: force-reopen a reservation (e.g. disputed) WITHOUT a strike.
+CREATE OR REPLACE FUNCTION public.admin_reopen_reservation(p_deal_id UUID)
+RETURNS public.deals LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE d public.deals; reopened public.deals;
+BEGIN
+  IF NOT public.is_admin(auth.uid()) THEN RAISE EXCEPTION 'Only admins can reopen reservations'; END IF;
+  SELECT * INTO d FROM public.deals WHERE id = p_deal_id FOR UPDATE;
+  IF d IS NULL THEN RAISE EXCEPTION 'Deal not found'; END IF;
+  IF d.status != 'accepted' THEN RAISE EXCEPTION 'Only a reserved (accepted, no order) deal can be reopened'; END IF;
+  IF EXISTS (SELECT 1 FROM public.orders WHERE deal_id = p_deal_id) THEN
+    RAISE EXCEPTION 'An order was already placed; use the normal lifecycle instead';
+  END IF;
+
+  UPDATE public.deals
+  SET status = 'approved', customer_id = NULL, reserved_at = NULL, reserved_until = NULL, updated_at = now()
+  WHERE id = p_deal_id AND status = 'accepted'
+  RETURNING * INTO reopened;
+
+  INSERT INTO public.reservation_events (deal_id, user_id, event_type, reserved_at, reserved_until, detail)
+  VALUES (p_deal_id, d.customer_id, 'admin_reopened', d.reserved_at, d.reserved_until, 'Admin reopened the reservation (no strike)');
+
+  INSERT INTO public.notifications (user_id, title, message, type, link)
+  VALUES (d.customer_id, 'Reservation reopened by admin',
+    'An admin released your reservation on "' || d.product_name || '". No strike was recorded.', 'info', '/deals/' || p_deal_id);
+
+  RETURN reopened;
+END;
+$$;
+
+-- Admin: tune the reservation rules.
+CREATE OR REPLACE FUNCTION public.admin_update_reservation_config(
+  p_enabled BOOLEAN, p_hold_seconds INT, p_release_grace_seconds INT, p_max_accepts_per_deal INT,
+  p_strike_window_days INT, p_cooldown2_seconds INT, p_cooldown3_seconds INT, p_cooldown_abuse_seconds INT)
+RETURNS public.reservation_config LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE cfg public.reservation_config;
+BEGIN
+  IF NOT public.is_admin(auth.uid()) THEN RAISE EXCEPTION 'Only admins can update reservation config'; END IF;
+  UPDATE public.reservation_config SET
+    enabled = COALESCE(p_enabled, enabled),
+    hold_seconds = GREATEST(60, COALESCE(p_hold_seconds, hold_seconds)),
+    release_grace_seconds = GREATEST(0, COALESCE(p_release_grace_seconds, release_grace_seconds)),
+    max_accepts_per_deal = GREATEST(1, COALESCE(p_max_accepts_per_deal, max_accepts_per_deal)),
+    strike_window_days = GREATEST(1, COALESCE(p_strike_window_days, strike_window_days)),
+    cooldown2_seconds = GREATEST(0, COALESCE(p_cooldown2_seconds, cooldown2_seconds)),
+    cooldown3_seconds = GREATEST(0, COALESCE(p_cooldown3_seconds, cooldown3_seconds)),
+    cooldown_abuse_seconds = GREATEST(0, COALESCE(p_cooldown_abuse_seconds, cooldown_abuse_seconds)),
+    updated_at = now()
+  WHERE id = true RETURNING * INTO cfg;
+  RETURN cfg;
 END;
 $$;
 

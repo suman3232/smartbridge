@@ -54,7 +54,9 @@ export default function Landing() {
       // even though the deals base table is participant-only under RLS.
       const { data, error } = await supabase.rpc("list_open_deals");
       if (!error && data) {
-        setOpenDealsCount(data.length);
+        // Reserved deals are in the feed (with a countdown) but aren't acceptable
+        // right now, so don't count them as "open".
+        setOpenDealsCount(data.filter((d) => !d.is_reserved).length);
       }
     };
 

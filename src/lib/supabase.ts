@@ -51,6 +51,8 @@ export type Deal = {
   admin_contact_number: string | null;
   status: 'pending' | 'approved' | 'rejected' | 'accepted' | 'in_progress' | 'completed' | 'cancelled';
   admin_notes: string | null;
+  reserved_at: string | null;
+  reserved_until: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -75,7 +77,24 @@ export type Notification = {
   created_at: string;
 };
 
-export type OpenDeal = Omit<Deal, "delivery_address" | "admin_notes">;
+// list_open_deals returns is_reserved/reserved_until/server_now but not
+// reserved_at (and never the address/notes).
+export type OpenDeal = Omit<Deal, "delivery_address" | "admin_notes" | "reserved_at"> & {
+  is_reserved: boolean;
+  reserved_until: string | null;
+  server_now: string;
+};
+
+/** Caller's live reservation + cooldown state (get_my_reservation_status). */
+export type MyReservationStatus = {
+  active_deal_id: string | null;
+  active_product_name: string | null;
+  active_reserved_until: string | null;
+  blocked_until: string | null;
+  strikes_30d: number;
+  under_review: boolean;
+  server_now: string;
+};
 
 export type WithdrawalRequest = {
   id: string;

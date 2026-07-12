@@ -59,6 +59,8 @@ export type Database = {
           product_name: string
           remaining_amount: number
           required_card: string
+          reserved_at: string | null
+          reserved_until: string | null
           status: Database["public"]["Enums"]["deal_status"] | null
           updated_at: string | null
         }
@@ -79,6 +81,8 @@ export type Database = {
           product_name: string
           remaining_amount: number
           required_card: string
+          reserved_at?: string | null
+          reserved_until?: string | null
           status?: Database["public"]["Enums"]["deal_status"] | null
           updated_at?: string | null
         }
@@ -99,6 +103,8 @@ export type Database = {
           product_name?: string
           remaining_amount?: number
           required_card?: string
+          reserved_at?: string | null
+          reserved_until?: string | null
           status?: Database["public"]["Enums"]["deal_status"] | null
           updated_at?: string | null
         }
@@ -118,6 +124,112 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      reservation_config: {
+        Row: {
+          id: boolean
+          enabled: boolean
+          hold_seconds: number
+          release_grace_seconds: number
+          max_accepts_per_deal: number
+          strike_window_days: number
+          cooldown2_seconds: number
+          cooldown3_seconds: number
+          cooldown_abuse_seconds: number
+          updated_at: string
+        }
+        Insert: {
+          id?: boolean
+          enabled?: boolean
+          hold_seconds?: number
+          release_grace_seconds?: number
+          max_accepts_per_deal?: number
+          strike_window_days?: number
+          cooldown2_seconds?: number
+          cooldown3_seconds?: number
+          cooldown_abuse_seconds?: number
+          updated_at?: string
+        }
+        Update: {
+          enabled?: boolean
+          hold_seconds?: number
+          release_grace_seconds?: number
+          max_accepts_per_deal?: number
+          strike_window_days?: number
+          cooldown2_seconds?: number
+          cooldown3_seconds?: number
+          cooldown_abuse_seconds?: number
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      reservation_events: {
+        Row: {
+          id: string
+          deal_id: string | null
+          user_id: string | null
+          event_type: string
+          within_grace: boolean | null
+          reserved_at: string | null
+          reserved_until: string | null
+          detail: string | null
+          voided: boolean
+          created_at: string
+        }
+        Insert: {
+          id?: string
+          deal_id?: string | null
+          user_id?: string | null
+          event_type: string
+          within_grace?: boolean | null
+          reserved_at?: string | null
+          reserved_until?: string | null
+          detail?: string | null
+          voided?: boolean
+          created_at?: string
+        }
+        Update: {
+          event_type?: string
+          within_grace?: boolean | null
+          detail?: string | null
+          voided?: boolean
+        }
+        Relationships: []
+      }
+      cardholder_reliability: {
+        Row: {
+          user_id: string
+          total_expiries: number
+          total_releases: number
+          strikes_30d: number
+          acceptance_blocked_until: string | null
+          last_expiry_at: string | null
+          under_review: boolean
+          admin_note: string | null
+          updated_at: string
+        }
+        Insert: {
+          user_id: string
+          total_expiries?: number
+          total_releases?: number
+          strikes_30d?: number
+          acceptance_blocked_until?: string | null
+          last_expiry_at?: string | null
+          under_review?: boolean
+          admin_note?: string | null
+          updated_at?: string
+        }
+        Update: {
+          total_expiries?: number
+          total_releases?: number
+          strikes_30d?: number
+          acceptance_blocked_until?: string | null
+          last_expiry_at?: string | null
+          under_review?: boolean
+          admin_note?: string | null
+          updated_at?: string
+        }
+        Relationships: []
       }
       delivery_confirmations: {
         Row: {
@@ -737,6 +849,8 @@ export type Database = {
           product_name: string
           remaining_amount: number
           required_card: string
+          reserved_at: string | null
+          reserved_until: string | null
           status: Database["public"]["Enums"]["deal_status"] | null
           updated_at: string | null
         }
@@ -766,6 +880,8 @@ export type Database = {
           product_name: string
           remaining_amount: number
           required_card: string
+          reserved_at: string | null
+          reserved_until: string | null
           status: Database["public"]["Enums"]["deal_status"] | null
           updated_at: string | null
         }
@@ -817,6 +933,9 @@ export type Database = {
           remaining_amount: number
           created_at: string | null
           updated_at: string | null
+          is_reserved: boolean
+          reserved_until: string | null
+          server_now: string
         }[]
       }
       get_deal_accept_preview: {
@@ -851,7 +970,90 @@ export type Database = {
           admin_notes: string | null
           created_at: string
           updated_at: string
+          reserved_at: string | null
+          reserved_until: string | null
+          server_now: string
         }[]
+      }
+      release_deal: {
+        Args: { p_deal_id: string }
+        Returns: Database["public"]["Tables"]["deals"]["Row"]
+      }
+      expire_reservation: {
+        Args: { p_deal_id: string }
+        Returns: boolean
+      }
+      expire_stale_reservations: {
+        Args: Record<string, never>
+        Returns: number
+      }
+      get_my_reservation_status: {
+        Args: Record<string, never>
+        Returns: {
+          active_deal_id: string | null
+          active_product_name: string | null
+          active_reserved_until: string | null
+          blocked_until: string | null
+          strikes_30d: number
+          under_review: boolean
+          server_now: string
+        }[]
+      }
+      admin_list_reservation_events: {
+        Args: { p_limit?: number }
+        Returns: {
+          id: string
+          deal_id: string | null
+          product_name: string | null
+          user_id: string | null
+          user_name: string | null
+          user_email: string | null
+          event_type: string
+          within_grace: boolean | null
+          reserved_at: string | null
+          reserved_until: string | null
+          detail: string | null
+          voided: boolean
+          created_at: string
+        }[]
+      }
+      admin_list_cardholder_reliability: {
+        Args: Record<string, never>
+        Returns: {
+          user_id: string
+          full_name: string | null
+          email: string | null
+          phone: string | null
+          total_expiries: number
+          total_releases: number
+          strikes_30d: number
+          acceptance_blocked_until: string | null
+          last_expiry_at: string | null
+          under_review: boolean
+          admin_note: string | null
+          server_now: string
+        }[]
+      }
+      admin_reset_cardholder: {
+        Args: { p_user_id: string; p_note?: string | null }
+        Returns: undefined
+      }
+      admin_reopen_reservation: {
+        Args: { p_deal_id: string }
+        Returns: Database["public"]["Tables"]["deals"]["Row"]
+      }
+      admin_update_reservation_config: {
+        Args: {
+          p_enabled: boolean
+          p_hold_seconds: number
+          p_release_grace_seconds: number
+          p_max_accepts_per_deal: number
+          p_strike_window_days: number
+          p_cooldown2_seconds: number
+          p_cooldown3_seconds: number
+          p_cooldown_abuse_seconds: number
+        }
+        Returns: Database["public"]["Tables"]["reservation_config"]["Row"]
       }
       approve_kyc: {
         Args: { p_kyc_id: string; p_notes?: string | null }
@@ -1027,6 +1229,8 @@ export type Database = {
           product_name: string
           remaining_amount: number
           required_card: string
+          reserved_at: string | null
+          reserved_until: string | null
           status: Database["public"]["Enums"]["deal_status"] | null
           updated_at: string | null
         }

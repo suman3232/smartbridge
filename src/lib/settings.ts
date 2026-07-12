@@ -64,3 +64,58 @@ export function useSupportWhatsApp(): string | null | undefined {
 
   return value;
 }
+
+// ---------------------------------------------------------------------------
+// Reservation window (admin-tunable) — used so UI copy matches the real config
+// instead of hard-coding "30 minutes" / "5 minutes".
+// ---------------------------------------------------------------------------
+export type ReservationWindow = { holdMinutes: number; graceMinutes: number };
+
+const DEFAULT_WINDOW: ReservationWindow = { holdMinutes: 30, graceMinutes: 5 };
+let windowCache: ReservationWindow | undefined;
+let windowInflight: Promise<ReservationWindow> | null = null;
+
+export async function getReservationWindow(): Promise<ReservationWindow> {
+  if (windowCache) return windowCache;
+  if (!windowInflight) {
+    windowInflight = supabase
+      .from("reservation_config")
+      .select("hold_seconds, release_grace_seconds")
+      .eq("id", true)
+      .maybeSingle()
+      .then(({ data }) => {
+        windowCache = data
+          ? {
+              holdMinutes: Math.max(1, Math.round(data.hold_seconds / 60)),
+              graceMinutes: Math.max(0, Math.round(data.release_grace_seconds / 60)),
+            }
+          : DEFAULT_WINDOW;
+        return windowCache;
+      })
+      .catch(() => {
+        windowCache = DEFAULT_WINDOW;
+        return windowCache;
+      })
+      .finally(() => {
+        windowInflight = null;
+      });
+  }
+  return windowInflight;
+}
+
+/** Hook variant; resolves to the defaults until the config row loads. */
+export function useReservationWindow(): ReservationWindow {
+  const [value, setValue] = useState<ReservationWindow>(windowCache ?? DEFAULT_WINDOW);
+
+  useEffect(() => {
+    let active = true;
+    void getReservationWindow().then((v) => {
+      if (active) setValue(v);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  return value;
+}

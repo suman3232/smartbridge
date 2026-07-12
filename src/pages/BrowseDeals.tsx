@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/hooks/use-toast";
-import { supabase, OpenDeal } from "@/lib/supabase";
+import { supabase, OpenDeal, MyReservationStatus } from "@/lib/supabase";
 import {
   Search,
   CreditCard,
@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { AcceptDealDialog } from "@/components/deals/AcceptDealDialog";
 import { WhatsAppButton } from "@/components/ui/whatsapp-button";
+import { ReservationCountdown } from "@/components/deals/ReservationCountdown";
 import { useSupportWhatsApp } from "@/lib/settings";
 import { Navbar } from "@/components/layout/Navbar";
 import { PageHeader } from "@/components/ui/page-header";
@@ -40,9 +41,10 @@ function BrowseDealsContent({
   const [search, setSearch] = useState("");
   const supportNumber = useSupportWhatsApp();
   const [selectedDeal, setSelectedDeal] = useState<OpenDeal | null>(null);
+  const [myStatus, setMyStatus] = useState<MyReservationStatus | null>(null);
 
-  const fetchDeals = async () => {
-    setLoading(true);
+  const fetchDeals = async (silent = false) => {
+    if (!silent) setLoading(true);
     const { data, error } = await supabase.rpc("list_open_deals");
 
     if (error) {
@@ -50,12 +52,39 @@ function BrowseDealsContent({
     } else if (data) {
       setDeals(data as OpenDeal[]);
     }
-    setLoading(false);
+    if (!silent) setLoading(false);
+  };
+
+  const fetchMyStatus = async () => {
+    if (!user) return;
+    const { data, error } = await supabase.rpc("get_my_reservation_status");
+    // On error keep the previous status rather than silently dropping the
+    // cooldown/active-reservation banners.
+    if (!error) setMyStatus((data?.[0] as MyReservationStatus) ?? null);
   };
 
   useEffect(() => {
     void fetchDeals();
+    void fetchMyStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Compare against the SERVER clock (skew-corrected) so a wrong device clock
+  // can neither hide nor prolong the cooldown banner.
+  const statusSkew = myStatus?.server_now ? Date.parse(myStatus.server_now) - Date.now() : 0;
+  const cooldownUntil = myStatus?.blocked_until ? new Date(myStatus.blocked_until) : null;
+  const onCooldown = !!cooldownUntil && cooldownUntil.getTime() > Date.now() + statusSkew;
+  const hasActiveReservation = !!myStatus?.active_deal_id;
+
+  // Refresh the status shortly after the cooldown lapses so the banner clears
+  // and Accept re-enables without a manual reload.
+  useEffect(() => {
+    if (!onCooldown || !cooldownUntil) return;
+    const ms = Math.min(cooldownUntil.getTime() - (Date.now() + statusSkew) + 1500, 2 ** 31 - 1);
+    const t = window.setTimeout(() => void fetchMyStatus(), Math.max(ms, 1000));
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [myStatus?.blocked_until]);
 
   const handleAcceptClick = (deal: OpenDeal) => {
     if (!user) {
@@ -95,6 +124,40 @@ function BrowseDealsContent({
           }
         />
 
+        {onCooldown && (
+          <Card className="border-destructive/30 bg-destructive/5">
+            <CardContent className="p-4">
+              <p className="text-sm font-medium text-destructive">Acceptance paused</p>
+              <p className="text-sm text-muted-foreground">
+                After missed reservations, you can accept new deals again after {cooldownUntil!.toLocaleString()}.
+                {myStatus?.under_review ? " Your account is also under admin review." : ""}
+              </p>
+            </CardContent>
+          </Card>
+        )}
+
+        {myStatus?.active_deal_id && (
+          <Card className="border-primary/30 bg-primary/5">
+            <CardContent className="flex flex-wrap items-center justify-between gap-3 p-4">
+              <p className="text-sm text-muted-foreground">
+                You have an active reservation on <span className="font-medium text-foreground">{myStatus.active_product_name}</span> — finish or release it first.
+              </p>
+              <div className="flex items-center gap-3">
+                {myStatus.active_reserved_until && (
+                  <ReservationCountdown
+                    reservedUntil={myStatus.active_reserved_until}
+                    serverNow={myStatus.server_now}
+                    onExpire={() => { void fetchDeals(true); void fetchMyStatus(); }}
+                  />
+                )}
+                <Link to={`/deals/${myStatus.active_deal_id}`}>
+                  <Button size="sm" variant="outline">Open</Button>
+                </Link>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
         {loading ? (
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
             {[0, 1, 2, 3, 4, 5].map((i) => (
@@ -131,8 +194,8 @@ function BrowseDealsContent({
                         {deal.required_card}
                       </CardDescription>
                     </div>
-                    <Badge variant="approved" className="capitalize">
-                      open
+                    <Badge variant={deal.is_reserved ? "secondary" : "approved"} className="capitalize">
+                      {deal.is_reserved ? "Reserved" : "open"}
                     </Badge>
                   </div>
                 </CardHeader>
@@ -148,17 +211,32 @@ function BrowseDealsContent({
                     </div>
                   </div>
 
-                  <p className="text-xs text-muted-foreground">
-                    Delivery address is shared only after you accept, to protect the shopper's privacy.
-                  </p>
+                  {deal.is_reserved ? (
+                    <div className="flex items-center justify-between gap-2 rounded-xl bg-secondary/40 p-3">
+                      <span className="text-xs text-muted-foreground">Reserved — frees up in</span>
+                      {deal.reserved_until && (
+                        <ReservationCountdown
+                          reservedUntil={deal.reserved_until}
+                          serverNow={deal.server_now}
+                          onExpire={() => { void fetchDeals(true); }}
+                        />
+                      )}
+                    </div>
+                  ) : (
+                    <>
+                      <p className="text-xs text-muted-foreground">
+                        Delivery address is shared only after you accept, to protect the shopper's privacy.
+                      </p>
 
-                  {supportNumber && (
-                    <WhatsAppButton
-                      phone={supportNumber}
-                      message={`Hi, I need help with the OfferBridge deal "${deal.product_name}".`}
-                      label="Chat with support"
-                      className="w-full"
-                    />
+                      {supportNumber && (
+                        <WhatsAppButton
+                          phone={supportNumber}
+                          message={`Hi, I need help with the OfferBridge deal "${deal.product_name}".`}
+                          label="Chat with support"
+                          className="w-full"
+                        />
+                      )}
+                    </>
                   )}
 
                   <div className="flex gap-2">
@@ -173,10 +251,30 @@ function BrowseDealsContent({
                         Product
                       </Button>
                     </a>
-                    <Button className="flex-1" onClick={() => handleAcceptClick(deal)}>
-                      Accept
-                      <ArrowRight className="w-4 h-4 ml-2" />
-                    </Button>
+                    {deal.is_reserved ? (
+                      deal.id === myStatus?.active_deal_id ? (
+                        <Link to={`/deals/${deal.id}`} className="flex-1">
+                          <Button className="w-full">
+                            Your reservation
+                            <ArrowRight className="w-4 h-4 ml-2" />
+                          </Button>
+                        </Link>
+                      ) : (
+                        <Button variant="outline" className="flex-1" disabled>
+                          Reserved
+                        </Button>
+                      )
+                    ) : (
+                      <Button
+                        className="flex-1"
+                        onClick={() => handleAcceptClick(deal)}
+                        disabled={onCooldown || hasActiveReservation}
+                        title={hasActiveReservation ? "Finish or release your current reservation first" : undefined}
+                      >
+                        Accept
+                        <ArrowRight className="w-4 h-4 ml-2" />
+                      </Button>
+                    )}
                   </div>
                 </CardContent>
               </Card>

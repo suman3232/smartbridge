@@ -26,6 +26,7 @@ import {
   AlertCircle,
   Gift,
   MessageCircle,
+  Timer,
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { 
@@ -94,6 +95,48 @@ type ReferralConfigForm = {
   enabled: boolean;
 };
 
+type ReservationEvent = {
+  id: string;
+  deal_id: string | null;
+  product_name: string | null;
+  user_id: string | null;
+  user_name: string | null;
+  user_email: string | null;
+  event_type: string;
+  within_grace: boolean | null;
+  reserved_at: string | null;
+  reserved_until: string | null;
+  detail: string | null;
+  voided: boolean;
+  created_at: string;
+};
+
+type CardholderReliability = {
+  user_id: string;
+  full_name: string | null;
+  email: string | null;
+  phone: string | null;
+  total_expiries: number;
+  total_releases: number;
+  strikes_30d: number;
+  acceptance_blocked_until: string | null;
+  last_expiry_at: string | null;
+  under_review: boolean;
+  admin_note: string | null;
+  server_now: string;
+};
+
+type ReservationConfigForm = {
+  enabled: boolean;
+  hold_minutes: string;
+  grace_minutes: string;
+  max_accepts: string;
+  window_days: string;
+  cd2_minutes: string;
+  cd3_hours: string;
+  abuse_hours: string;
+};
+
 export default function AdminPanel() {
   const { isAdmin, profile, loading: authLoading } = useAuth();
   const navigate = useNavigate();
@@ -115,6 +158,19 @@ export default function AdminPanel() {
   const [savingConfig, setSavingConfig] = useState(false);
   const [supportNumber, setSupportNumber] = useState("");
   const [savingSupport, setSavingSupport] = useState(false);
+  const [resEvents, setResEvents] = useState<ReservationEvent[]>([]);
+  const [reliability, setReliability] = useState<CardholderReliability[]>([]);
+  const [resConfig, setResConfig] = useState<ReservationConfigForm>({
+    enabled: true,
+    hold_minutes: "30",
+    grace_minutes: "5",
+    max_accepts: "3",
+    window_days: "30",
+    cd2_minutes: "60",
+    cd3_hours: "24",
+    abuse_hours: "168",
+  });
+  const [savingResConfig, setSavingResConfig] = useState(false);
   const [grantEmail, setGrantEmail] = useState("");
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
@@ -147,7 +203,7 @@ export default function AdminPanel() {
 
   const fetchAll = async () => {
     setLoading(true);
-    const [dealsRes, kycRes, withdrawalsRes, adminsRes, referralsRes, configRes, settingsRes] = await Promise.all([
+    const [dealsRes, kycRes, withdrawalsRes, adminsRes, referralsRes, configRes, settingsRes, resEventsRes, reliabilityRes, resCfgRes] = await Promise.all([
       supabase.from("deals").select("*").order("created_at", { ascending: false }),
       supabase.rpc("list_kycs_for_admin"),
       supabase.from("withdrawal_requests").select("*").order("created_at", { ascending: false }),
@@ -155,9 +211,29 @@ export default function AdminPanel() {
       supabase.rpc("admin_list_referrals"),
       supabase.from("referral_config").select("*").maybeSingle(),
       supabase.from("app_settings").select("support_whatsapp").eq("id", true).maybeSingle(),
+      supabase.rpc("admin_list_reservation_events", { p_limit: 100 }),
+      supabase.rpc("admin_list_cardholder_reliability"),
+      supabase.from("reservation_config").select("*").maybeSingle(),
     ]);
 
     if (settingsRes.data) setSupportNumber(settingsRes.data.support_whatsapp ?? "");
+
+    // Reservation system (errors ignored gracefully until setup.sql is applied).
+    if (resEventsRes.data) setResEvents(resEventsRes.data as ReservationEvent[]);
+    if (reliabilityRes.data) setReliability(reliabilityRes.data as CardholderReliability[]);
+    if (resCfgRes.data) {
+      const c = resCfgRes.data;
+      setResConfig({
+        enabled: c.enabled,
+        hold_minutes: String(Math.round(c.hold_seconds / 60)),
+        grace_minutes: String(Math.round(c.release_grace_seconds / 60)),
+        max_accepts: String(c.max_accepts_per_deal),
+        window_days: String(c.strike_window_days),
+        cd2_minutes: String(Math.round(c.cooldown2_seconds / 60)),
+        cd3_hours: String(Math.round(c.cooldown3_seconds / 3600)),
+        abuse_hours: String(Math.round(c.cooldown_abuse_seconds / 3600)),
+      });
+    }
 
     if (referralsRes.data) setReferrals(referralsRes.data as AdminReferral[]);
     if (configRes.data) {
@@ -484,6 +560,55 @@ export default function AdminPanel() {
     }
   };
 
+  const handleSaveResConfig = async (e: FormEvent) => {
+    e.preventDefault();
+    setSavingResConfig(true);
+    const { error } = await supabase.rpc("admin_update_reservation_config", {
+      p_enabled: resConfig.enabled,
+      p_hold_seconds: Math.max(1, parseInt(resConfig.hold_minutes, 10) || 30) * 60,
+      p_release_grace_seconds: Math.max(0, parseInt(resConfig.grace_minutes, 10) || 0) * 60,
+      p_max_accepts_per_deal: Math.max(1, parseInt(resConfig.max_accepts, 10) || 3),
+      p_strike_window_days: Math.max(1, parseInt(resConfig.window_days, 10) || 30),
+      p_cooldown2_seconds: Math.max(0, parseInt(resConfig.cd2_minutes, 10) || 0) * 60,
+      p_cooldown3_seconds: Math.max(0, parseInt(resConfig.cd3_hours, 10) || 0) * 3600,
+      p_cooldown_abuse_seconds: Math.max(0, parseInt(resConfig.abuse_hours, 10) || 0) * 3600,
+    });
+    setSavingResConfig(false);
+    if (error) {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    } else {
+      toast({ title: "Reservation rules saved" });
+      void fetchAll();
+    }
+  };
+
+  const handleResetCardholder = async (userId: string) => {
+    setActionLoading(`rel-${userId}`);
+    const { error } = await supabase.rpc("admin_reset_cardholder", {
+      p_user_id: userId,
+      p_note: "Cooldown lifted by admin",
+    });
+    setActionLoading(null);
+    if (error) {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    } else {
+      toast({ title: "Reliability reset", description: "Cooldown lifted and strikes cleared." });
+      void fetchAll();
+    }
+  };
+
+  const handleReopenReservation = async (dealId: string) => {
+    setActionLoading(dealId);
+    const { error } = await supabase.rpc("admin_reopen_reservation", { p_deal_id: dealId });
+    setActionLoading(null);
+    if (error) {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    } else {
+      toast({ title: "Reservation reopened", description: "The deal is open again — no strike recorded." });
+      void fetchAll();
+    }
+  };
+
   const pendingReferrals = referrals.filter((r) => r.status === "pending").length;
 
   const pendingDeals = deals.filter((d) => d.status === "pending");
@@ -660,6 +785,26 @@ export default function AdminPanel() {
               )}
             </Button>
           )}
+
+          {deal.status === "accepted" && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => handleReopenReservation(deal.id)}
+              disabled={actionLoading === deal.id}
+              className="flex-1 min-w-[140px]"
+              title="Release the current holder's reservation without recording a strike"
+            >
+              {actionLoading === deal.id ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <>
+                  <Timer className="w-4 h-4 mr-1" />
+                  Reopen (no strike)
+                </>
+              )}
+            </Button>
+          )}
         </div>
       </CardContent>
     </Card>
@@ -742,6 +887,10 @@ export default function AdminPanel() {
             <TabsTrigger value="referrals" className="gap-2">
               <Gift className="w-4 h-4" />
               Referrals ({pendingReferrals})
+            </TabsTrigger>
+            <TabsTrigger value="reservations" className="gap-2">
+              <Timer className="w-4 h-4" />
+              Reservations ({reliability.filter((r) => r.under_review || (r.acceptance_blocked_until && new Date(r.acceptance_blocked_until) > new Date())).length})
             </TabsTrigger>
             <TabsTrigger value="admins" className="gap-2">
               <Users className="w-4 h-4" />
@@ -945,6 +1094,158 @@ export default function AdminPanel() {
                               {r.status === "rewarded" ? "Reverse" : "Void"}
                             </Button>
                           )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="reservations" className="space-y-4">
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Timer className="w-5 h-5" />
+                  Reservation rules
+                </CardTitle>
+                <CardDescription>
+                  Card holders get a time window to place the order after reserving a deal. Missed windows escalate:
+                  warning → cooldown → longer cooldown → admin review. No wallet money is ever deducted.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <form onSubmit={handleSaveResConfig} className="space-y-4">
+                  <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <div>
+                      <Label htmlFor="rc-hold">Hold window (minutes)</Label>
+                      <Input id="rc-hold" type="number" min="1" value={resConfig.hold_minutes}
+                        onChange={(e) => setResConfig((c) => ({ ...c, hold_minutes: e.target.value }))} className="mt-1" />
+                    </div>
+                    <div>
+                      <Label htmlFor="rc-grace">Penalty-free release (minutes)</Label>
+                      <Input id="rc-grace" type="number" min="0" value={resConfig.grace_minutes}
+                        onChange={(e) => setResConfig((c) => ({ ...c, grace_minutes: e.target.value }))} className="mt-1" />
+                    </div>
+                    <div>
+                      <Label htmlFor="rc-max">Max reserves per deal/user</Label>
+                      <Input id="rc-max" type="number" min="1" value={resConfig.max_accepts}
+                        onChange={(e) => setResConfig((c) => ({ ...c, max_accepts: e.target.value }))} className="mt-1" />
+                    </div>
+                    <div>
+                      <Label htmlFor="rc-window">Strike window (days)</Label>
+                      <Input id="rc-window" type="number" min="1" value={resConfig.window_days}
+                        onChange={(e) => setResConfig((c) => ({ ...c, window_days: e.target.value }))} className="mt-1" />
+                    </div>
+                    <div>
+                      <Label htmlFor="rc-cd2">2nd miss cooldown (minutes)</Label>
+                      <Input id="rc-cd2" type="number" min="0" value={resConfig.cd2_minutes}
+                        onChange={(e) => setResConfig((c) => ({ ...c, cd2_minutes: e.target.value }))} className="mt-1" />
+                    </div>
+                    <div>
+                      <Label htmlFor="rc-cd3">3rd miss cooldown (hours)</Label>
+                      <Input id="rc-cd3" type="number" min="0" value={resConfig.cd3_hours}
+                        onChange={(e) => setResConfig((c) => ({ ...c, cd3_hours: e.target.value }))} className="mt-1" />
+                    </div>
+                    <div>
+                      <Label htmlFor="rc-abuse">4th+ miss cooldown (hours)</Label>
+                      <Input id="rc-abuse" type="number" min="0" value={resConfig.abuse_hours}
+                        onChange={(e) => setResConfig((c) => ({ ...c, abuse_hours: e.target.value }))} className="mt-1" />
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <Switch checked={resConfig.enabled} onCheckedChange={(v) => setResConfig((c) => ({ ...c, enabled: v }))} />
+                    <span className="text-sm">{resConfig.enabled ? "Strikes & cooldowns enabled" : "Strikes & cooldowns paused (reservations still expire)"}</span>
+                  </div>
+                  <Button type="submit" disabled={savingResConfig}>
+                    {savingResConfig ? <Loader2 className="w-4 h-4 animate-spin" /> : "Save rules"}
+                  </Button>
+                </form>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>Card holder reliability ({reliability.length})</CardTitle>
+                <CardDescription>Strikes, cooldowns and releases. Reset lifts the cooldown and clears strikes.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {reliability.length === 0 ? (
+                  <p className="py-8 text-center text-muted-foreground">No reliability records yet — nobody has missed or released a reservation.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {reliability.map((r) => {
+                      const blocked = r.acceptance_blocked_until && new Date(r.acceptance_blocked_until) > new Date();
+                      return (
+                        <div key={r.user_id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-3 rounded-xl bg-secondary/30">
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium">
+                              {r.full_name || "—"}
+                              <span className="font-normal text-muted-foreground"> ({r.email})</span>
+                            </p>
+                            <p className="text-xs text-muted-foreground">
+                              {r.strikes_30d} strike{r.strikes_30d === 1 ? "" : "s"} in window · {r.total_expiries} expir{r.total_expiries === 1 ? "y" : "ies"} · {r.total_releases} release{r.total_releases === 1 ? "" : "s"} total
+                              {r.phone ? ` · ${r.phone}` : ""}
+                            </p>
+                            {blocked && (
+                              <p className="text-xs text-destructive">Blocked until {new Date(r.acceptance_blocked_until!).toLocaleString()}</p>
+                            )}
+                            {r.admin_note && <p className="text-xs text-muted-foreground">{r.admin_note}</p>}
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            {r.under_review && <Badge variant="rejected">Under review</Badge>}
+                            {blocked && <Badge variant="pending">Cooldown</Badge>}
+                            {(blocked || r.under_review || r.strikes_30d > 0) && (
+                              <Button size="sm" variant="outline"
+                                onClick={() => handleResetCardholder(r.user_id)}
+                                disabled={actionLoading === `rel-${r.user_id}`}>
+                                {actionLoading === `rel-${r.user_id}` ? <Loader2 className="w-4 h-4 animate-spin" /> : "Reset"}
+                              </Button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>Reservation history</CardTitle>
+                <CardDescription>Audit trail of reserves, fulfilments, releases, expiries and admin overrides (latest 100).</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {resEvents.length === 0 ? (
+                  <p className="py-8 text-center text-muted-foreground">No reservation activity yet.</p>
+                ) : (
+                  <div className="space-y-2">
+                    {resEvents.map((e) => (
+                      <div key={e.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 p-3 rounded-xl bg-secondary/30">
+                        <div className="min-w-0">
+                          <p className="text-sm">
+                            <span className="font-medium">{e.user_name || e.user_email || "Unknown user"}</span>
+                            <span className="text-muted-foreground"> · {e.product_name || "deleted deal"}</span>
+                          </p>
+                          {e.detail && <p className="text-xs text-muted-foreground">{e.detail}</p>}
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          {e.voided && <Badge variant="secondary">forgiven</Badge>}
+                          <Badge
+                            variant={
+                              e.event_type === "fulfilled" ? "success"
+                              : e.event_type === "expired" ? "rejected"
+                              : e.event_type === "released" ? (e.within_grace ? "secondary" : "pending")
+                              : e.event_type === "admin_reopened" ? "pending"
+                              : "approved"
+                            }
+                            className="capitalize"
+                          >
+                            {e.event_type.replace("_", " ")}
+                          </Badge>
+                          <span className="text-xs text-muted-foreground whitespace-nowrap">{new Date(e.created_at).toLocaleString()}</span>
                         </div>
                       </div>
                     ))}

@@ -19,9 +19,12 @@ import {
   MapPin,
   Package,
   CheckCircle,
+  Timer,
+  XCircle,
 } from "lucide-react";
 import { WhatsAppButton } from "@/components/ui/whatsapp-button";
-import { useSupportWhatsApp } from "@/lib/settings";
+import { useSupportWhatsApp, useReservationWindow } from "@/lib/settings";
+import { ReservationCountdown } from "@/components/deals/ReservationCountdown";
 
 type Order = {
   id: string;
@@ -39,6 +42,7 @@ export default function DealDetail() {
   const navigate = useNavigate();
 
   const supportNumber = useSupportWhatsApp();
+  const reservationWindow = useReservationWindow();
   const [deal, setDeal] = useState<Deal | null>(null);
   const [order, setOrder] = useState<Order | null>(null);
   const [loading, setLoading] = useState(true);
@@ -46,6 +50,7 @@ export default function DealDetail() {
   const [trackingId, setTrackingId] = useState("");
   const [screenshotPath, setScreenshotPath] = useState("");
   const [screenshotSignedUrl, setScreenshotSignedUrl] = useState<string | null>(null);
+  const [serverNow, setServerNow] = useState<string | null>(null);
 
   const fetchDeal = async () => {
     if (!id) {
@@ -61,7 +66,17 @@ export default function DealDetail() {
     if (dealRes.error) {
       toast({ title: "Couldn't load deal", description: dealRes.error.message, variant: "destructive" });
     }
-    if (dealRes.data?.[0]) setDeal(dealRes.data[0] as Deal);
+    if (dealRes.data?.[0]) {
+      const row = dealRes.data[0];
+      setServerNow(row.server_now ?? null);
+      setDeal(row as Deal);
+    } else if (!dealRes.error) {
+      // Zero rows without an error: the viewer lost access (e.g. their
+      // reservation expired and someone else took the deal). Clear stale state
+      // instead of showing an actionable "Reserved for you" card forever.
+      setDeal(null);
+      setServerNow(null);
+    }
     if (orderRes.data) {
       const ord = orderRes.data as Order;
       setOrder(ord);
@@ -100,6 +115,13 @@ export default function DealDetail() {
 
     if (error) {
       toast({ title: "Error", description: error.message, variant: "destructive" });
+      // A lapsed window is rejected server-side without persisting the expiry
+      // (a RAISE would roll it back there); finalize it from here so the deal
+      // reopens and the state converges immediately.
+      if (/expired|no longer active/i.test(error.message)) {
+        await supabase.rpc("expire_stale_reservations");
+        fetchDeal();
+      }
     } else {
       toast({
         title: "Order recorded",
@@ -107,6 +129,25 @@ export default function DealDetail() {
       });
       fetchDeal();
     }
+  };
+
+  const handleReleaseDeal = async () => {
+    if (!deal) return;
+    setActionLoading(true);
+    const { error } = await supabase.rpc("release_deal", { p_deal_id: deal.id });
+    setActionLoading(false);
+    if (error) {
+      toast({ title: "Could not release", description: error.message, variant: "destructive" });
+    } else {
+      toast({ title: "Reservation released", description: "The deal is open for other card holders again." });
+      navigate("/deals");
+    }
+  };
+
+  // Countdown hit zero on the client — ask the server to finalize expiry, then refresh.
+  const handleReservationExpired = async () => {
+    await supabase.rpc("expire_stale_reservations");
+    fetchDeal();
   };
 
   const handleCompleteDeal = async () => {
@@ -180,7 +221,7 @@ export default function DealDetail() {
               {deal.required_card}
             </p>
           </div>
-          <Badge className="capitalize">{deal.status.replace("_", " ")}</Badge>
+          <Badge className="capitalize">{deal.status === "accepted" ? "Reserved" : deal.status.replace("_", " ")}</Badge>
         </div>
 
         <Card>
@@ -260,19 +301,29 @@ export default function DealDetail() {
         </div>
 
         {isCardHolder && deal.status === "accepted" && !order && (
-          <Card className="border-primary/20">
+          <Card className="border-primary/30">
             <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Package className="w-5 h-5" />
-                Place order
-              </CardTitle>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <CardTitle className="flex items-center gap-2">
+                  <Timer className="w-5 h-5 text-primary" />
+                  Reserved for you
+                </CardTitle>
+                {deal.reserved_until && (
+                  <ReservationCountdown
+                    reservedUntil={deal.reserved_until}
+                    serverNow={serverNow ?? undefined}
+                    onExpire={handleReservationExpired}
+                    warn
+                  />
+                )}
+              </div>
               <CardDescription>
-                Order on Amazon/Flipkart using your card. Use the delivery address above. Then record details here.
+                Place the order on Amazon/Flipkart using your card at the delivery address above, then submit proof before the timer ends. If you can't complete it, release it so another card holder can.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div>
-                <Label htmlFor="tracking">Tracking ID (optional)</Label>
+                <Label htmlFor="tracking">Tracking ID</Label>
                 <Input
                   id="tracking"
                   value={trackingId}
@@ -282,7 +333,7 @@ export default function DealDetail() {
                 />
               </div>
               <div>
-                <Label>Order screenshot (optional)</Label>
+                <Label>Order screenshot</Label>
                 <div className="mt-1">
                   <FileUpload
                     bucket={ORDER_SCREENSHOT_BUCKET}
@@ -292,10 +343,45 @@ export default function DealDetail() {
                     onCleared={() => setScreenshotPath("")}
                   />
                 </div>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Provide a tracking ID or an order screenshot as proof — at least one is required.
+                </p>
               </div>
-              <Button onClick={handlePlaceOrder} disabled={actionLoading} className="w-full">
-                {actionLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : "I've placed the order"}
-              </Button>
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <Button
+                  onClick={handlePlaceOrder}
+                  disabled={actionLoading || (!trackingId.trim() && !screenshotPath.trim())}
+                  className="flex-1"
+                >
+                  {actionLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : "I've placed the order"}
+                </Button>
+                <Button variant="outline" onClick={handleReleaseDeal} disabled={actionLoading} className="sm:w-auto">
+                  <XCircle className="w-4 h-4 mr-2" />
+                  Release deal
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Releasing within the first {reservationWindow.graceMinutes} minutes is penalty-free. After that, a
+                release or an expired timer counts as a missed reservation — repeated misses pause your ability to
+                accept new deals.
+              </p>
+            </CardContent>
+          </Card>
+        )}
+
+        {isShopper && deal.status === "accepted" && (
+          <Card className="border-primary/20 bg-primary/5">
+            <CardContent className="flex flex-wrap items-center justify-between gap-3 p-4">
+              <p className="text-sm text-muted-foreground">
+                A card holder reserved your deal and is placing the order. If they don't finish in time, it reopens automatically.
+              </p>
+              {deal.reserved_until && (
+                <ReservationCountdown
+                  reservedUntil={deal.reserved_until}
+                  serverNow={serverNow ?? undefined}
+                  onExpire={handleReservationExpired}
+                />
+              )}
             </CardContent>
           </Card>
         )}

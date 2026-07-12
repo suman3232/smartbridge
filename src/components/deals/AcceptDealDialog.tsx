@@ -5,7 +5,8 @@ import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 import { supabase, OpenDeal } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
-import { Loader2, MapPin } from "lucide-react";
+import { useReservationWindow } from "@/lib/settings";
+import { AlertTriangle, Loader2, MapPin } from "lucide-react";
 
 type AcceptPreview = {
   id: string;
@@ -29,22 +30,27 @@ export function AcceptDealDialog({ deal, open, onOpenChange, onSuccess }: Accept
   const { toast } = useToast();
   const navigate = useNavigate();
   const { profile } = useAuth();
+  const reservationWindow = useReservationWindow();
   const [loading, setLoading] = useState(false);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [preview, setPreview] = useState<AcceptPreview | null>(null);
+  const [previewLoaded, setPreviewLoaded] = useState(false);
 
   useEffect(() => {
     const loadPreview = async () => {
       if (!open || !deal) {
         setPreview(null);
+        setPreviewLoaded(false);
         return;
       }
 
       setPreviewLoading(true);
+      setPreviewLoaded(false);
       const { data, error } = await supabase.rpc("get_deal_accept_preview", {
         p_deal_id: deal.id,
       });
       setPreviewLoading(false);
+      setPreviewLoaded(true);
 
       if (error) {
         toast({ title: "Error", description: error.message, variant: "destructive" });
@@ -52,6 +58,8 @@ export function AcceptDealDialog({ deal, open, onOpenChange, onSuccess }: Accept
         return;
       }
 
+      // Zero rows = the deal was reserved/taken between browse render and this
+      // click; the "unavailable" note below explains it instead of a dead button.
       setPreview((data?.[0] as AcceptPreview | undefined) ?? null);
     };
 
@@ -112,6 +120,10 @@ export function AcceptDealDialog({ deal, open, onOpenChange, onSuccess }: Accept
           <DialogTitle>Accept this deal</DialogTitle>
           <DialogDescription>
             You'll place the order on Amazon/Flipkart using your card and ship to the shopper.
+            Accepting reserves the deal for you for {reservationWindow.holdMinutes} minutes — submit order proof
+            (tracking ID or screenshot) within that window or it reopens for others.
+            {reservationWindow.graceMinutes > 0 &&
+              ` You can release it penalty-free in the first ${reservationWindow.graceMinutes} minutes.`}
           </DialogDescription>
         </DialogHeader>
 
@@ -138,14 +150,26 @@ export function AcceptDealDialog({ deal, open, onOpenChange, onSuccess }: Accept
             </p>
           </div>
 
-          <div className="p-4 rounded-xl border border-white/[0.08]">
-            <div className="flex items-start gap-2">
-              <MapPin className="w-4 h-4 text-primary mt-0.5 shrink-0" />
-              <p className="text-sm text-muted-foreground">
-                Delivery address is shared only after you accept, to protect the shopper's privacy.
-              </p>
+          {previewLoaded && !preview ? (
+            <div className="p-4 rounded-xl border border-warning/30 bg-warning/10">
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-warning mt-0.5 shrink-0" />
+                <p className="text-sm text-muted-foreground">
+                  This deal was just reserved by another card holder (or is no longer open).
+                  Close this dialog and pick a different deal — it may free up if their timer runs out.
+                </p>
+              </div>
             </div>
-          </div>
+          ) : (
+            <div className="p-4 rounded-xl border border-white/[0.08]">
+              <div className="flex items-start gap-2">
+                <MapPin className="w-4 h-4 text-primary mt-0.5 shrink-0" />
+                <p className="text-sm text-muted-foreground">
+                  Delivery address is shared only after you accept, to protect the shopper's privacy.
+                </p>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="flex gap-3">
