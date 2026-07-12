@@ -72,6 +72,20 @@ export default function Auth() {
 
     if (authError || errorCode) {
       const decoded = decodeURIComponent((authError ?? errorCode ?? "").replace(/\+/g, " "));
+
+      // Confirmation link opened in a DIFFERENT browser than the signup one:
+      // the PKCE code exchange fails, but the email itself is already verified
+      // server-side — tell the user to simply sign in instead of showing a
+      // cryptic "code verifier" error.
+      if (/code verifier|flow.?state|both auth code/i.test(decoded)) {
+        toast({
+          title: "Email verified ✓",
+          description: "Your email is confirmed. Sign in with your email and password to continue.",
+        });
+        window.history.replaceState({}, "", "/auth");
+        return;
+      }
+
       toast({
         title: "Sign In Failed",
         description: formatAuthError({
