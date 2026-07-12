@@ -6,8 +6,11 @@
  * WhatsApp requires the number as digits only, in full international form.
  */
 export function whatsappLink(phone: string, message?: string): string {
-  const digits = (phone ?? "").replace(/\D/g, "");
+  let digits = (phone ?? "").replace(/\D/g, "");
   if (!digits) return "";
+  // wa.me requires the FULL international number. Admins often save a bare
+  // 10-digit Indian mobile (starts 6-9) — prefix the country code for them.
+  if (digits.length === 10 && /^[6-9]/.test(digits)) digits = `91${digits}`;
   const base = `https://wa.me/${digits}`;
   return message ? `${base}?text=${encodeURIComponent(message)}` : base;
 }

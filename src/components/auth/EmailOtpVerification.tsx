@@ -57,7 +57,10 @@ export function EmailOtpVerification({ email, onVerified, onBack }: EmailOtpVeri
     const { error } = await supabase.auth.resend({ type: "signup", email });
     setResending(false);
     if (error) {
-      toast({ title: "Couldn't resend", description: error.message, variant: "destructive" });
+      const friendly = /rate limit/i.test(error.message)
+        ? "Email limit reached for now. Use the link in the email you already received, or try resending in a while."
+        : error.message;
+      toast({ title: "Couldn't resend", description: friendly, variant: "destructive" });
       return;
     }
     setCooldown(RESEND_COOLDOWN);
@@ -73,7 +76,11 @@ export function EmailOtpVerification({ email, onVerified, onBack }: EmailOtpVeri
         <div>
           <h2 className="text-xl font-bold">Verify your email</h2>
           <p className="text-sm text-muted-foreground mt-1">
-            We sent a 6-digit code to <span className="font-medium text-foreground">{email}</span>.
+            We sent a verification email to <span className="font-medium text-foreground">{email}</span>.
+          </p>
+          <p className="text-xs text-muted-foreground mt-2">
+            Enter the 6-digit code from the email — or if it shows a confirmation <span className="font-medium text-foreground">link</span>,
+            just click it and this page will continue automatically.
           </p>
         </div>
       </div>

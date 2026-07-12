@@ -196,7 +196,10 @@ export default function Auth() {
       if (needsEmailConfirmation) {
         // Show the 6-digit OTP verification step. The stored referral code is
         // applied automatically once the email is verified.
-        toast({ title: "Check your inbox", description: `We sent a 6-digit code to ${email}.` });
+        toast({
+          title: "Check your inbox",
+          description: `We sent a verification email to ${email} — enter its 6-digit code, or click its link.`,
+        });
         setOtpDestination(destination);
         setOtpEmail(email);
         return;
