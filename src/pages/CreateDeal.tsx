@@ -26,7 +26,12 @@ export default function CreateDeal() {
     expected_buy_price: "",
     required_card: "",
     commission_amount: "",
-    delivery_address: "",
+    recipient_name: "",
+    address_line: "",
+    city: "",
+    state: "",
+    pincode: "",
+    delivery_instructions: "",
   });
 
   // Calculate amounts automatically
@@ -98,12 +103,23 @@ export default function CreateDeal() {
       return;
     }
 
-    if (!formData.delivery_address.trim()) {
-      toast({ title: "Error", description: "Delivery address is required", variant: "destructive" });
+    if (!formData.recipient_name.trim() || !formData.address_line.trim() || !formData.city.trim()
+        || !formData.state.trim() || !formData.pincode.trim()) {
+      toast({ title: "Delivery details incomplete", description: "Recipient name, address, city, state and PIN are required.", variant: "destructive" });
       return;
     }
 
     setLoading(true);
+
+    // Compose the address the card holder ships to — WITHOUT the buyer's phone.
+    // The buyer's real phone stays private in their profile (admin-only); the
+    // card holder uses the OfferBridge delivery number when placing the order.
+    const composedAddress = [
+      formData.recipient_name.trim(),
+      formData.address_line.trim(),
+      `${formData.city.trim()}, ${formData.state.trim()} ${formData.pincode.trim()}`,
+      formData.delivery_instructions.trim(),
+    ].filter(Boolean).join("\n");
 
     const { error } = await supabase.from("deals").insert({
       merchant_id: profile.id,
@@ -114,7 +130,13 @@ export default function CreateDeal() {
       expected_buy_price: expectedBuyPrice,
       required_card: formData.required_card,
       commission_amount: commissionAmount,
-      delivery_address: formData.delivery_address.trim(),
+      recipient_name: formData.recipient_name.trim(),
+      address_line: formData.address_line.trim(),
+      city: formData.city.trim(),
+      state: formData.state.trim(),
+      pincode: formData.pincode.trim(),
+      delivery_instructions: formData.delivery_instructions.trim() || null,
+      delivery_address: composedAddress,
       advance_amount: advanceAmount,
       remaining_amount: remainingAmount,
       status: "pending"
@@ -203,20 +225,43 @@ export default function CreateDeal() {
                   </div>
                 </div>
 
-                <div>
-                  <Label htmlFor="delivery_address">Your delivery address</Label>
-                  <Textarea
-                    id="delivery_address"
-                    name="delivery_address"
-                    placeholder="Full name, phone, address, city, pincode — where the product should be delivered"
-                    value={formData.delivery_address}
-                    onChange={handleChange}
-                    required
-                    className="mt-1 min-h-[100px]"
-                  />
-                  <p className="text-xs text-muted-foreground mt-1">
-                    The card holder will ship to this address when they place the order
-                  </p>
+                <div className="pt-2 border-t space-y-4">
+                  <div>
+                    <h3 className="font-semibold">Delivery details</h3>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Where to ship the product. Your <span className="font-medium text-foreground">phone number stays private</span> — the
+                      card holder never sees it and uses the OfferBridge delivery number instead. OfferBridge support contacts you if the courier needs help.
+                    </p>
+                  </div>
+                  <div>
+                    <Label htmlFor="recipient_name">Recipient name</Label>
+                    <Input id="recipient_name" name="recipient_name" placeholder="Who receives the parcel"
+                      value={formData.recipient_name} onChange={handleChange} required className="mt-1" />
+                  </div>
+                  <div>
+                    <Label htmlFor="address_line">Full address</Label>
+                    <Textarea id="address_line" name="address_line" placeholder="House / flat, street, area, landmark"
+                      value={formData.address_line} onChange={handleChange} required className="mt-1 min-h-[80px]" />
+                  </div>
+                  <div className="grid sm:grid-cols-3 gap-4">
+                    <div>
+                      <Label htmlFor="city">City</Label>
+                      <Input id="city" name="city" value={formData.city} onChange={handleChange} required className="mt-1" />
+                    </div>
+                    <div>
+                      <Label htmlFor="state">State</Label>
+                      <Input id="state" name="state" value={formData.state} onChange={handleChange} required className="mt-1" />
+                    </div>
+                    <div>
+                      <Label htmlFor="pincode">PIN code</Label>
+                      <Input id="pincode" name="pincode" inputMode="numeric" value={formData.pincode} onChange={handleChange} required className="mt-1" />
+                    </div>
+                  </div>
+                  <div>
+                    <Label htmlFor="delivery_instructions">Delivery instructions (optional)</Label>
+                    <Input id="delivery_instructions" name="delivery_instructions" placeholder="e.g. Leave at the gate, call on arrival"
+                      value={formData.delivery_instructions} onChange={handleChange} className="mt-1" />
+                  </div>
                 </div>
               </div>
 

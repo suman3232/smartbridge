@@ -110,7 +110,7 @@ if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
       merchant_id: shopper.id, product_name: `Res E2E ${n}-${RUN}`, product_link: 'https://example.com/p',
       original_price: 1000, card_offer_price: 800, expected_buy_price: 900, commission_amount: 50,
       required_card: 'HDFC', delivery_address: 'E2E Street 1', advance_amount: 800, remaining_amount: 100, status: 'pending',
-    }).select().single();
+    }).select("id").single();
     if (error) throw new Error(error.message);
     const ap = await admin.rpc('approve_deal', { deal_id: data.id });
     if (ap.error) throw new Error(ap.error.message);
@@ -148,8 +148,9 @@ if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
   // Proof enforcement.
   {
     const noProof = await holder1.c.rpc('place_deal_order', { p_deal_id: d1 });
-    rec('empty proof rejected (tracking or screenshot required)', !!noProof.error && /tracking id|screenshot/i.test(noProof.error?.message ?? ''), noProof.error?.message);
-    const wrongUser = await holder2.c.rpc('place_deal_order', { p_deal_id: d1, p_tracking_id: 'FAKE-1' });
+    rec('empty proof rejected (screenshot required)', !!noProof.error && /screenshot|tracking id/i.test(noProof.error?.message ?? ''), noProof.error?.message);
+    const EDD = new Date(Date.now() + 5 * 864e5).toISOString().slice(0, 10);
+    const wrongUser = await holder2.c.rpc('place_deal_order', { p_deal_id: d1, p_order_screenshot_url: 'x/s.png', p_marketplace_order_id: 'FAKE-1', p_estimated_delivery_date: EDD });
     sec('non-holder cannot submit proof', !!wrongUser.error, wrongUser.error?.message);
   }
 
@@ -184,7 +185,8 @@ if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
     const acc = await holder1.c.rpc('accept_deal', { p_deal_id: d2 });
     rec('holder reserves deal 2', !acc.error, acc.error?.message);
     await sleep(HOLD + 4);
-    const late = await holder1.c.rpc('place_deal_order', { p_deal_id: d2, p_tracking_id: 'LATE-1' });
+    const EDD_L = new Date(Date.now() + 5 * 864e5).toISOString().slice(0, 10);
+    const late = await holder1.c.rpc('place_deal_order', { p_deal_id: d2, p_order_screenshot_url: 'x/s.png', p_marketplace_order_id: 'LATE-1', p_estimated_delivery_date: EDD_L });
     rec('proof AFTER the window is rejected (server clock, not client)', !!late.error && /expired/i.test(late.error?.message ?? ''), late.error?.message);
     // The rejection itself doesn't persist the expiry (a RAISE would roll it back
     // server-side) — the app finalizes it via the sweep, exactly like this:
@@ -226,10 +228,15 @@ if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
   // Happy path: proof in time stops the timer; completion + wallet still work.
   {
     const acc = await holder2.c.rpc('accept_deal', { p_deal_id: d3 });
-    const placed = await holder2.c.rpc('place_deal_order', { p_deal_id: d3, p_tracking_id: `E2E-TRK-${RUN}` });
+    const EDD3 = new Date(Date.now() + 5 * 864e5).toISOString().slice(0, 10);
+    const placed = await holder2.c.rpc('place_deal_order', { p_deal_id: d3, p_tracking_id: `E2E-TRK-${RUN}`, p_order_screenshot_url: 'x/s.png', p_marketplace_order_id: `OID-${RUN}`, p_estimated_delivery_date: EDD3 });
     rec('proof within window accepted (fulfilled)', !acc.error && !placed.error, placed.error?.message);
     const { data: v } = await holder2.c.rpc('get_deal_for_viewer', { p_deal_id: d3 });
     rec('timer cleared and deal moved to in_progress', v?.[0]?.status === 'in_progress' && v?.[0]?.reserved_until === null, JSON.stringify({ status: v?.[0]?.status, ru: v?.[0]?.reserved_until }));
+    // New-flow settlement requires verified payment + buyer receipt confirmation.
+    await shopper.c.rpc('submit_buyer_payment', { p_deal_id: d3, p_reference: `UTR-${RUN}` });
+    await admin.rpc('admin_verify_payment', { p_deal_id: d3, p_approve: true });
+    await shopper.c.rpc('buyer_confirm_receipt', { p_deal_id: d3 });
     const before = (await holder2.c.from('wallets').select('balance').eq('user_id', holder2.id).single()).data?.balance ?? 0;
     const done = await admin.rpc('complete_deal', { p_deal_id: d3 });
     const after = (await holder2.c.from('wallets').select('balance').eq('user_id', holder2.id).single()).data?.balance ?? 0;

@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/hooks/use-toast";
-import { supabase, Deal } from "@/lib/supabase";
+import { supabase, Deal, OrderRow } from "@/lib/supabase";
 import { FileUpload } from "@/components/ui/file-upload";
 import { ORDER_SCREENSHOT_BUCKET, getSignedUrl } from "@/lib/storage";
 import {
@@ -25,14 +25,17 @@ import {
 import { WhatsAppButton } from "@/components/ui/whatsapp-button";
 import { useSupportWhatsApp, useReservationWindow } from "@/lib/settings";
 import { ReservationCountdown } from "@/components/deals/ReservationCountdown";
+import { FulfilmentPanel } from "@/components/deals/FulfilmentPanel";
 
-type Order = {
-  id: string;
-  deal_id: string;
-  tracking_id: string | null;
-  order_screenshot_url: string | null;
-  status: string;
-  created_at: string;
+type DeliveryDetails = {
+  recipient_name: string | null;
+  address_line: string | null;
+  city: string | null;
+  state: string | null;
+  pincode: string | null;
+  delivery_instructions: string | null;
+  legacy_address: string | null;
+  offerbridge_contact: string;
 };
 
 export default function DealDetail() {
@@ -44,13 +47,19 @@ export default function DealDetail() {
   const supportNumber = useSupportWhatsApp();
   const reservationWindow = useReservationWindow();
   const [deal, setDeal] = useState<Deal | null>(null);
-  const [order, setOrder] = useState<Order | null>(null);
+  const [order, setOrder] = useState<OrderRow | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
   const [trackingId, setTrackingId] = useState("");
+  const [marketplaceOrderId, setMarketplaceOrderId] = useState("");
+  const [platform, setPlatform] = useState("");
+  const [estDelivery, setEstDelivery] = useState("");
+  const [deliveryCodeType, setDeliveryCodeType] = useState("none");
   const [screenshotPath, setScreenshotPath] = useState("");
   const [screenshotSignedUrl, setScreenshotSignedUrl] = useState<string | null>(null);
   const [serverNow, setServerNow] = useState<string | null>(null);
+  const [deliveryDetails, setDeliveryDetails] = useState<DeliveryDetails | null>(null);
+  const [deliveryDetailsError, setDeliveryDetailsError] = useState<string | null>(null);
 
   const fetchDeal = async () => {
     if (!id) {
@@ -78,7 +87,7 @@ export default function DealDetail() {
       setServerNow(null);
     }
     if (orderRes.data) {
-      const ord = orderRes.data as Order;
+      const ord = orderRes.data as OrderRow;
       setOrder(ord);
       if (ord.order_screenshot_url) {
         // Stored value is a private-bucket path; resolve a short-lived signed URL.
@@ -87,28 +96,60 @@ export default function DealDetail() {
           : await getSignedUrl(ORDER_SCREENSHOT_BUCKET, ord.order_screenshot_url);
         setScreenshotSignedUrl(signed);
       }
+    } else {
+      setOrder(null);
     }
     setLoading(false);
   };
 
+  // Sanitized delivery details for the card holder (recipient + address + the
+  // OfferBridge delivery number — never the buyer's phone). Enforced server-side.
+  const loadDeliveryDetails = async () => {
+    if (!id) return;
+    const { data, error } = await supabase.rpc("get_order_delivery_details", { p_deal_id: id });
+    if (error) { setDeliveryDetailsError(error.message); setDeliveryDetails(null); }
+    else { setDeliveryDetails((data?.[0] as DeliveryDetails) ?? null); setDeliveryDetailsError(null); }
+  };
+
   useEffect(() => {
     fetchDeal();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   const isShopper = deal?.merchant_id === profile?.id;
   const isCardHolder = deal?.customer_id === profile?.id;
-  const canViewAddress =
-    Boolean(deal?.delivery_address) &&
-    (isShopper || isCardHolder || isAdmin);
+
+  useEffect(() => {
+    if (isCardHolder && (deal?.status === "accepted" || deal?.status === "in_progress")) {
+      void loadDeliveryDetails();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isCardHolder, deal?.status]);
 
   const handlePlaceOrder = async () => {
     if (!deal) return;
+    if (!screenshotPath.trim()) {
+      toast({ title: "Screenshot required", description: "Upload the order confirmation screenshot.", variant: "destructive" });
+      return;
+    }
+    if (!marketplaceOrderId.trim()) {
+      toast({ title: "Order ID required", description: "Enter the marketplace order ID.", variant: "destructive" });
+      return;
+    }
+    if (!estDelivery) {
+      toast({ title: "Delivery date required", description: "Enter the estimated delivery date.", variant: "destructive" });
+      return;
+    }
     setActionLoading(true);
 
     const { error } = await supabase.rpc("place_deal_order", {
       p_deal_id: deal.id,
       p_tracking_id: trackingId.trim() || null,
       p_order_screenshot_url: screenshotPath.trim() || null,
+      p_marketplace_order_id: marketplaceOrderId.trim(),
+      p_platform: platform.trim() || null,
+      p_estimated_delivery_date: estDelivery,
+      p_delivery_code_type: deliveryCodeType,
     });
 
     setActionLoading(false);
@@ -249,19 +290,64 @@ export default function DealDetail() {
           </CardContent>
         </Card>
 
-        {canViewAddress && deal.delivery_address && (
+        {(isShopper || isAdmin) && deal.delivery_address && (
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <MapPin className="w-5 h-5" />
                 Delivery address
               </CardTitle>
-              <CardDescription>Ship the product to this address when placing the order</CardDescription>
+              <CardDescription>Where this order ships</CardDescription>
             </CardHeader>
             <CardContent>
               <p className="text-sm leading-relaxed whitespace-pre-wrap">{deal.delivery_address}</p>
             </CardContent>
           </Card>
+        )}
+
+        {/* Card holder: sanitized delivery details (never the buyer's phone). */}
+        {isCardHolder && (deal.status === "accepted" || deal.status === "in_progress") && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <MapPin className="w-5 h-5" />
+                Order delivery details
+              </CardTitle>
+              <CardDescription>Ship here. Use the OfferBridge number for the order — not a personal number.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-2 text-sm">
+              {deliveryDetailsError ? (
+                <p className="text-destructive">{deliveryDetailsError}</p>
+              ) : deliveryDetails ? (
+                <>
+                  {deliveryDetails.recipient_name && <p><span className="text-muted-foreground">Recipient:</span> {deliveryDetails.recipient_name}</p>}
+                  {deliveryDetails.address_line
+                    ? <p className="whitespace-pre-wrap">{deliveryDetails.address_line}{(deliveryDetails.city || deliveryDetails.state || deliveryDetails.pincode) ? `\n${[deliveryDetails.city, deliveryDetails.state, deliveryDetails.pincode].filter(Boolean).join(", ")}` : ""}</p>
+                    : <p className="whitespace-pre-wrap">{deliveryDetails.legacy_address}</p>}
+                  {deliveryDetails.delivery_instructions && <p><span className="text-muted-foreground">Instructions:</span> {deliveryDetails.delivery_instructions}</p>}
+                  <div className="mt-2 rounded-lg bg-primary/10 p-3">
+                    <p className="text-xs text-muted-foreground">Use this contact number on the order</p>
+                    <p className="font-semibold text-primary">{deliveryDetails.offerbridge_contact}</p>
+                    <p className="text-xs text-muted-foreground mt-1">The buyer's personal number is private. OfferBridge support coordinates with them if the courier calls.</p>
+                  </div>
+                </>
+              ) : (
+                <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+              )}
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Full fulfilment lifecycle once an order exists. */}
+        {order && (
+          <FulfilmentPanel
+            deal={deal}
+            order={order}
+            isBuyer={isShopper}
+            isCardHolder={isCardHolder}
+            isAdmin={isAdmin}
+            onChange={fetchDeal}
+          />
         )}
 
         {supportNumber && (
@@ -322,15 +408,36 @@ export default function DealDetail() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
+              <div className="grid sm:grid-cols-2 gap-4">
+                <div>
+                  <Label htmlFor="mordid">Marketplace order ID</Label>
+                  <Input id="mordid" value={marketplaceOrderId} onChange={(e) => setMarketplaceOrderId(e.target.value)}
+                    placeholder="e.g. 402-1234567-8901234" className="mt-1" />
+                </div>
+                <div>
+                  <Label htmlFor="platform">Platform (optional)</Label>
+                  <Input id="platform" value={platform} onChange={(e) => setPlatform(e.target.value)}
+                    placeholder="Marketplace name" className="mt-1" />
+                </div>
+                <div>
+                  <Label htmlFor="edd">Estimated delivery date</Label>
+                  <Input id="edd" type="date" value={estDelivery} onChange={(e) => setEstDelivery(e.target.value)} className="mt-1" />
+                </div>
+                <div>
+                  <Label htmlFor="tracking">Tracking ID (optional now)</Label>
+                  <Input id="tracking" value={trackingId} onChange={(e) => setTrackingId(e.target.value)}
+                    placeholder="AWB / tracking number" className="mt-1" />
+                </div>
+              </div>
               <div>
-                <Label htmlFor="tracking">Tracking ID</Label>
-                <Input
-                  id="tracking"
-                  value={trackingId}
-                  onChange={(e) => setTrackingId(e.target.value)}
-                  placeholder="AWB / tracking number"
-                  className="mt-1"
-                />
+                <Label>Delivery verification needed?</Label>
+                <select value={deliveryCodeType} onChange={(e) => setDeliveryCodeType(e.target.value)}
+                  className="mt-1 w-full h-10 rounded-md border border-input bg-background px-3 text-sm">
+                  <option value="none">No OTP/PIN needed</option>
+                  <option value="otp">Delivery OTP</option>
+                  <option value="pin">Delivery PIN</option>
+                  <option value="openbox">Open-box code</option>
+                </select>
               </div>
               <div>
                 <Label>Order screenshot</Label>
@@ -344,13 +451,13 @@ export default function DealDetail() {
                   />
                 </div>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Provide a tracking ID or an order screenshot as proof — at least one is required.
+                  Order screenshot, order ID and estimated delivery date are required.
                 </p>
               </div>
               <div className="flex flex-col gap-2 sm:flex-row">
                 <Button
                   onClick={handlePlaceOrder}
-                  disabled={actionLoading || (!trackingId.trim() && !screenshotPath.trim())}
+                  disabled={actionLoading || !screenshotPath.trim() || !marketplaceOrderId.trim() || !estDelivery}
                   className="flex-1"
                 >
                   {actionLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : "I've placed the order"}

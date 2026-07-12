@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/hooks/use-toast";
-import { supabase, Deal, WithdrawalRequest } from "@/lib/supabase";
+import { supabase, Deal, WithdrawalRequest, DEAL_SAFE_COLUMNS } from "@/lib/supabase";
 import { getSignedUrl, KYC_BUCKET } from "@/lib/storage";
 import { clearSupportWhatsAppCache } from "@/lib/settings";
 import { 
@@ -126,6 +126,32 @@ type CardholderReliability = {
   server_now: string;
 };
 
+type OrderSearchRow = {
+  deal_id: string;
+  product_name: string;
+  deal_status: string;
+  buyer_name: string | null;
+  buyer_phone: string | null;
+  buyer_email: string | null;
+  cardholder_name: string | null;
+  cardholder_phone: string | null;
+  recipient_name: string | null;
+  address_line: string | null;
+  city: string | null;
+  state: string | null;
+  pincode: string | null;
+  legacy_address: string | null;
+  marketplace_order_id: string | null;
+  courier: string | null;
+  tracking_id: string | null;
+  estimated_delivery_date: string | null;
+  payment_due_date: string | null;
+  payment_status: string;
+  delivery_code_type: string | null;
+  dispute_status: string | null;
+  created_at: string;
+};
+
 type ReservationConfigForm = {
   enabled: boolean;
   hold_minutes: string;
@@ -158,6 +184,9 @@ export default function AdminPanel() {
   const [savingConfig, setSavingConfig] = useState(false);
   const [supportNumber, setSupportNumber] = useState("");
   const [savingSupport, setSavingSupport] = useState(false);
+  const [orderQuery, setOrderQuery] = useState("");
+  const [orderResults, setOrderResults] = useState<OrderSearchRow[]>([]);
+  const [searching, setSearching] = useState(false);
   const [resEvents, setResEvents] = useState<ReservationEvent[]>([]);
   const [reliability, setReliability] = useState<CardholderReliability[]>([]);
   const [resConfig, setResConfig] = useState<ReservationConfigForm>({
@@ -204,7 +233,7 @@ export default function AdminPanel() {
   const fetchAll = async () => {
     setLoading(true);
     const [dealsRes, kycRes, withdrawalsRes, adminsRes, referralsRes, configRes, settingsRes, resEventsRes, reliabilityRes, resCfgRes] = await Promise.all([
-      supabase.from("deals").select("*").order("created_at", { ascending: false }),
+      supabase.from("deals").select(DEAL_SAFE_COLUMNS).order("created_at", { ascending: false }),
       supabase.rpc("list_kycs_for_admin"),
       supabase.from("withdrawal_requests").select("*").order("created_at", { ascending: false }),
       supabase.rpc("list_admins"),
@@ -250,7 +279,7 @@ export default function AdminPanel() {
     if (dealsRes.error) {
       toast({ title: "Error", description: dealsRes.error.message, variant: "destructive" });
     } else if (dealsRes.data) {
-      const dealRows = dealsRes.data as Deal[];
+      const dealRows = dealsRes.data as unknown as Deal[];
       setDeals(dealRows);
 
       // Load the poster's + accepter's contact for each deal (admins can read all
@@ -597,6 +626,19 @@ export default function AdminPanel() {
     }
   };
 
+  const handleOrderSearch = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!orderQuery.trim()) return;
+    setSearching(true);
+    const { data, error } = await supabase.rpc("admin_order_search", { p_query: orderQuery.trim() });
+    setSearching(false);
+    if (error) {
+      toast({ title: "Search failed", description: error.message, variant: "destructive" });
+    } else {
+      setOrderResults((data as OrderSearchRow[]) ?? []);
+    }
+  };
+
   const handleReopenReservation = async (dealId: string) => {
     setActionLoading(dealId);
     const { error } = await supabase.rpc("admin_reopen_reservation", { p_deal_id: dealId });
@@ -891,6 +933,10 @@ export default function AdminPanel() {
             <TabsTrigger value="reservations" className="gap-2">
               <Timer className="w-4 h-4" />
               Reservations ({reliability.filter((r) => r.under_review || (r.acceptance_blocked_until && new Date(r.acceptance_blocked_until) > new Date())).length})
+            </TabsTrigger>
+            <TabsTrigger value="support" className="gap-2">
+              <MessageCircle className="w-4 h-4" />
+              Order lookup
             </TabsTrigger>
             <TabsTrigger value="admins" className="gap-2">
               <Users className="w-4 h-4" />
@@ -1253,6 +1299,54 @@ export default function AdminPanel() {
                 )}
               </CardContent>
             </Card>
+          </TabsContent>
+
+          <TabsContent value="support" className="space-y-4">
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2"><MessageCircle className="w-5 h-5" /> Delivery coordination lookup</CardTitle>
+                <CardDescription>
+                  Search by marketplace order ID, tracking/AWB, deal ID, buyer or card holder. Only authorized admins see the
+                  buyer's private phone — for coordinating with the courier. The delivery OTP/PIN itself is never shown here.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <form onSubmit={handleOrderSearch} className="flex gap-2">
+                  <Input value={orderQuery} onChange={(e) => setOrderQuery(e.target.value)} placeholder="Order ID, tracking, name, phone…" />
+                  <Button type="submit" disabled={searching}>{searching ? <Loader2 className="w-4 h-4 animate-spin" /> : "Search"}</Button>
+                </form>
+              </CardContent>
+            </Card>
+
+            {orderResults.map((r) => (
+              <Card key={r.deal_id}>
+                <CardContent className="p-4 space-y-2 text-sm">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="font-semibold">{r.product_name}</p>
+                    <Badge className="capitalize">{r.deal_status.replace("_", " ")}</Badge>
+                  </div>
+                  <div className="grid sm:grid-cols-2 gap-x-6 gap-y-1">
+                    <p><span className="text-muted-foreground">Buyer:</span> {r.buyer_name || "—"}</p>
+                    <p><span className="text-muted-foreground">Buyer phone:</span> <span className="font-medium">{r.buyer_phone || "—"}</span></p>
+                    <p><span className="text-muted-foreground">Card holder:</span> {r.cardholder_name || "—"}</p>
+                    <p><span className="text-muted-foreground">Order ID:</span> {r.marketplace_order_id || "—"}</p>
+                    <p><span className="text-muted-foreground">Courier:</span> {r.courier || "—"} {r.tracking_id ? `(${r.tracking_id})` : ""}</p>
+                    <p><span className="text-muted-foreground">Est. delivery:</span> {r.estimated_delivery_date || "—"}</p>
+                    <p><span className="text-muted-foreground">Payment due:</span> {r.payment_due_date || "—"}</p>
+                    <p><span className="text-muted-foreground">Payment:</span> <span className="capitalize">{r.payment_status.replace("_", " ")}</span></p>
+                    <p><span className="text-muted-foreground">OTP/PIN needed:</span> {r.delivery_code_type && r.delivery_code_type !== "none" ? r.delivery_code_type : "no"}</p>
+                    {r.dispute_status && <p><span className="text-muted-foreground">Dispute:</span> {r.dispute_status}</p>}
+                  </div>
+                  <p className="text-muted-foreground whitespace-pre-wrap pt-1 border-t">
+                    Ship to: {[r.recipient_name, r.address_line, [r.city, r.state, r.pincode].filter(Boolean).join(", ")].filter(Boolean).join(" · ") || r.legacy_address}
+                  </p>
+                  <Link to={`/deals/${r.deal_id}`} className="inline-block"><Button size="sm" variant="outline">Open deal</Button></Link>
+                </CardContent>
+              </Card>
+            ))}
+            {orderQuery && !searching && orderResults.length === 0 && (
+              <p className="text-center text-sm text-muted-foreground py-8">No matching orders.</p>
+            )}
           </TabsContent>
 
           <TabsContent value="admins" className="space-y-4">

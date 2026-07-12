@@ -54,7 +54,7 @@ let dealId = null;
     merchant_id: shopper.id, product_name: 'E2E Product', product_link: 'https://example.com/p',
     original_price: 1000, card_offer_price: 800, expected_buy_price: 900, commission_amount: 50,
     required_card: 'HDFC', delivery_address: '221B Baker Street, London', advance_amount: 800, remaining_amount: 100, status: 'pending',
-  }).select().maybeSingle();
+  }).select('id').maybeSingle();
   dealId = data?.id ?? null;
   rec('shopper creates pending deal', !error && !!dealId, error?.message);
 }
@@ -64,7 +64,7 @@ let dealId = null;
   const { data, error } = await shopper.c.from('deals').insert({
     merchant_id: shopper.id, product_name: 'HACK', product_link: 'https://x.com', original_price: 1, card_offer_price: 1,
     expected_buy_price: 1, commission_amount: 999, required_card: 'x', delivery_address: 'x', advance_amount: 1, remaining_amount: 0, status: 'approved',
-  }).select().maybeSingle();
+  }).select('id').maybeSingle();
   sec('cannot self-insert an APPROVED deal', !!error || !data, error ? 'blocked' : `INSERTED ${data?.id?.slice(0, 8)}`);
   if (data?.id) await shopper.c.from('deals').delete().eq('id', data.id);
 }
@@ -87,10 +87,12 @@ if (dealId) {
   if (data?.id) await shopper.c.from('withdrawal_requests').delete().eq('id', data.id);
 }
 
-// ---- SECURITY: PII leak — non-participant cannot read delivery_address via base table ----
+// ---- SECURITY: PII leak — delivery_address is column-REVOKEd, so NOBODY reads it
+// via the base table (a direct select now errors, not just returns 0 rows). ----
 {
-  const { data } = await holder.c.from('deals').select('id,delivery_address').eq('id', dealId ?? '0');
-  sec('non-participant cannot read deal delivery_address (base table)', !data || data.length === 0, `rows=${data?.length ?? 0}`);
+  const { data, error } = await holder.c.from('deals').select('id,delivery_address').eq('id', dealId ?? '0');
+  sec('delivery_address not readable via base table (column REVOKE)',
+    !!error || !data || data.length === 0, error ? 'denied' : `rows=${data?.length ?? 0}`);
 }
 
 // ---- non-admin blocked from admin RPCs ----

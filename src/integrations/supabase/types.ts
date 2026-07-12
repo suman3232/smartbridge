@@ -51,6 +51,22 @@ export type Database = {
           created_at: string | null
           customer_id: string | null
           delivery_address: string | null
+          recipient_name: string | null
+          address_line: string | null
+          city: string | null
+          state: string | null
+          pincode: string | null
+          delivery_instructions: string | null
+          estimated_delivery_date: string | null
+          payment_due_date: string | null
+          payment_status: string
+          payment_reference: string | null
+          payment_proof_url: string | null
+          payment_submitted_at: string | null
+          payment_verified_at: string | null
+          buyer_confirmed_at: string | null
+          settled_at: string | null
+          dispute_status: string | null
           expected_buy_price: number
           id: string
           merchant_id: string
@@ -73,6 +89,22 @@ export type Database = {
           created_at?: string | null
           customer_id?: string | null
           delivery_address?: string | null
+          recipient_name?: string | null
+          address_line?: string | null
+          city?: string | null
+          state?: string | null
+          pincode?: string | null
+          delivery_instructions?: string | null
+          estimated_delivery_date?: string | null
+          payment_due_date?: string | null
+          payment_status?: string
+          payment_reference?: string | null
+          payment_proof_url?: string | null
+          payment_submitted_at?: string | null
+          payment_verified_at?: string | null
+          buyer_confirmed_at?: string | null
+          settled_at?: string | null
+          dispute_status?: string | null
           expected_buy_price: number
           id?: string
           merchant_id: string
@@ -89,20 +121,21 @@ export type Database = {
         Update: {
           admin_contact_number?: string | null
           admin_notes?: string | null
-          advance_amount?: number
-          card_offer_price?: number
-          commission_amount?: number
-          created_at?: string | null
-          customer_id?: string | null
           delivery_address?: string | null
-          expected_buy_price?: number
-          id?: string
-          merchant_id?: string
-          original_price?: number
-          product_link?: string
-          product_name?: string
-          remaining_amount?: number
-          required_card?: string
+          recipient_name?: string | null
+          address_line?: string | null
+          city?: string | null
+          state?: string | null
+          pincode?: string | null
+          delivery_instructions?: string | null
+          estimated_delivery_date?: string | null
+          payment_due_date?: string | null
+          payment_status?: string
+          payment_reference?: string | null
+          payment_proof_url?: string | null
+          buyer_confirmed_at?: string | null
+          settled_at?: string | null
+          dispute_status?: string | null
           reserved_at?: string | null
           reserved_until?: string | null
           status?: Database["public"]["Enums"]["deal_status"] | null
@@ -444,6 +477,24 @@ export type Database = {
         }
         Relationships: []
       }
+      delivery_codes: {
+        Row: { deal_id: string; code_type: string; code_value: string; expires_at: string | null; cleared_at: string | null; first_released_at: string | null; created_at: string; updated_at: string }
+        Insert: { deal_id: string; code_type: string; code_value: string; expires_at?: string | null }
+        Update: { code_type?: string; code_value?: string; expires_at?: string | null; cleared_at?: string | null }
+        Relationships: []
+      }
+      order_events: {
+        Row: { id: string; deal_id: string | null; actor_id: string | null; event_type: string; detail: string | null; metadata: Json | null; created_at: string }
+        Insert: { deal_id?: string | null; actor_id?: string | null; event_type: string; detail?: string | null; metadata?: Json | null }
+        Update: { detail?: string | null }
+        Relationships: []
+      }
+      email_outbox: {
+        Row: { id: string; to_user_id: string | null; to_email: string | null; subject: string; body: string; dedup_key: string | null; status: string; created_at: string; sent_at: string | null }
+        Insert: { to_user_id?: string | null; to_email?: string | null; subject: string; body: string; dedup_key?: string | null; status?: string }
+        Update: { status?: string; sent_at?: string | null }
+        Relationships: []
+      }
       notifications: {
         Row: {
           created_at: string | null
@@ -454,6 +505,7 @@ export type Database = {
           title: string
           type: string | null
           user_id: string
+          dedup_key: string | null
         }
         Insert: {
           created_at?: string | null
@@ -464,6 +516,7 @@ export type Database = {
           title: string
           type?: string | null
           user_id: string
+          dedup_key?: string | null
         }
         Update: {
           created_at?: string | null
@@ -494,6 +547,13 @@ export type Database = {
           id: string
           order_screenshot_url: string | null
           otp_verified: boolean | null
+          marketplace_order_id: string | null
+          platform: string | null
+          amount_paid: number | null
+          courier: string | null
+          tracking_url: string | null
+          shipped_screenshot_url: string | null
+          delivery_code_type: string | null
           status: Database["public"]["Enums"]["order_status"] | null
           tracking_id: string | null
           updated_at: string | null
@@ -506,6 +566,13 @@ export type Database = {
           id?: string
           order_screenshot_url?: string | null
           otp_verified?: boolean | null
+          marketplace_order_id?: string | null
+          platform?: string | null
+          amount_paid?: number | null
+          courier?: string | null
+          tracking_url?: string | null
+          shipped_screenshot_url?: string | null
+          delivery_code_type?: string | null
           status?: Database["public"]["Enums"]["order_status"] | null
           tracking_id?: string | null
           updated_at?: string | null
@@ -903,16 +970,98 @@ export type Database = {
           p_deal_id: string
           p_tracking_id?: string | null
           p_order_screenshot_url?: string | null
+          p_marketplace_order_id?: string | null
+          p_platform?: string | null
+          p_estimated_delivery_date?: string | null
+          p_amount_paid?: number | null
+          p_delivery_code_type?: string | null
         }
+        Returns: Database["public"]["Tables"]["orders"]["Row"]
+      }
+      get_order_delivery_details: {
+        Args: { p_deal_id: string }
         Returns: {
-          id: string
-          deal_id: string
-          customer_id: string
-          tracking_id: string | null
-          order_screenshot_url: string | null
-          status: string
-          created_at: string | null
+          recipient_name: string | null
+          address_line: string | null
+          city: string | null
+          state: string | null
+          pincode: string | null
+          delivery_instructions: string | null
+          legacy_address: string | null
+          offerbridge_contact: string
+        }[]
+      }
+      update_shipping: {
+        Args: {
+          p_deal_id: string
+          p_courier: string
+          p_tracking_id: string
+          p_tracking_url?: string | null
+          p_estimated_delivery_date?: string | null
+          p_shipped_screenshot_url?: string | null
+          p_delivery_code_type?: string | null
         }
+        Returns: Database["public"]["Tables"]["orders"]["Row"]
+      }
+      submit_buyer_payment: {
+        Args: { p_deal_id: string; p_reference: string; p_proof_url?: string | null }
+        Returns: Database["public"]["Tables"]["deals"]["Row"]
+      }
+      admin_verify_payment: {
+        Args: { p_deal_id: string; p_approve: boolean; p_notes?: string | null }
+        Returns: Database["public"]["Tables"]["deals"]["Row"]
+      }
+      set_delivery_code: {
+        Args: { p_deal_id: string; p_code_type: string; p_code_value: string; p_ttl_minutes?: number }
+        Returns: undefined
+      }
+      get_delivery_code: {
+        Args: { p_deal_id: string }
+        Returns: { code_type: string; code_value: string; expires_at: string | null }[]
+      }
+      buyer_confirm_receipt: {
+        Args: { p_deal_id: string }
+        Returns: Database["public"]["Tables"]["deals"]["Row"]
+      }
+      raise_dispute: {
+        Args: { p_deal_id: string; p_reason: string }
+        Returns: Database["public"]["Tables"]["deals"]["Row"]
+      }
+      admin_resolve_dispute: {
+        Args: { p_deal_id: string; p_resolution: string; p_notes?: string | null }
+        Returns: Database["public"]["Tables"]["deals"]["Row"]
+      }
+      recompute_payment_states: {
+        Args: Record<string, never>
+        Returns: number
+      }
+      admin_order_search: {
+        Args: { p_query: string }
+        Returns: {
+          deal_id: string
+          product_name: string
+          deal_status: string
+          buyer_name: string | null
+          buyer_phone: string | null
+          buyer_email: string | null
+          cardholder_name: string | null
+          cardholder_phone: string | null
+          recipient_name: string | null
+          address_line: string | null
+          city: string | null
+          state: string | null
+          pincode: string | null
+          legacy_address: string | null
+          marketplace_order_id: string | null
+          courier: string | null
+          tracking_id: string | null
+          estimated_delivery_date: string | null
+          payment_due_date: string | null
+          payment_status: string
+          delivery_code_type: string | null
+          dispute_status: string | null
+          created_at: string
+        }[]
       }
       list_open_deals: {
         Args: Record<string, never>
@@ -973,6 +1122,15 @@ export type Database = {
           reserved_at: string | null
           reserved_until: string | null
           server_now: string
+          estimated_delivery_date: string | null
+          payment_due_date: string | null
+          payment_status: string
+          payment_reference: string | null
+          payment_proof_url: string | null
+          buyer_confirmed_at: string | null
+          settled_at: string | null
+          dispute_status: string | null
+          has_delivery_code: boolean
         }[]
       }
       release_deal: {

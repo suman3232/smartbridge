@@ -53,8 +53,61 @@ export type Deal = {
   admin_notes: string | null;
   reserved_at: string | null;
   reserved_until: string | null;
+  // Fulfilment lifecycle
+  estimated_delivery_date: string | null;
+  payment_due_date: string | null;
+  payment_status: PaymentStatus;
+  payment_reference: string | null;
+  payment_proof_url: string | null;
+  buyer_confirmed_at: string | null;
+  settled_at: string | null;
+  dispute_status: 'open' | 'resolved' | 'rejected' | null;
+  has_delivery_code?: boolean;
   created_at: string;
   updated_at: string;
+};
+
+// Columns a client may read directly from `deals`. The private delivery/payment
+// columns are column-level REVOKEd (buyer phone privacy) — reading them via
+// `select('*')` errors. Participants get those fields only through the masking
+// SECURITY DEFINER RPCs (get_deal_for_viewer / get_order_delivery_details).
+export const DEAL_SAFE_COLUMNS =
+  "id, merchant_id, customer_id, product_name, product_link, original_price, card_offer_price, " +
+  "expected_buy_price, advance_amount, remaining_amount, commission_amount, required_card, " +
+  "admin_contact_number, reserved_at, reserved_until, estimated_delivery_date, payment_due_date, " +
+  "payment_status, payment_submitted_at, payment_verified_at, buyer_confirmed_at, settled_at, " +
+  "dispute_status, status, admin_notes, created_at, updated_at";
+
+export type PaymentStatus =
+  | 'not_due' | 'due_soon' | 'due' | 'overdue'
+  | 'submitted' | 'verified' | 'refunded' | 'disputed';
+
+export type OrderRow = {
+  id: string;
+  deal_id: string;
+  customer_id: string;
+  order_screenshot_url: string | null;
+  tracking_id: string | null;
+  marketplace_order_id: string | null;
+  platform: string | null;
+  amount_paid: number | null;
+  courier: string | null;
+  tracking_url: string | null;
+  shipped_screenshot_url: string | null;
+  delivery_code_type: 'none' | 'otp' | 'pin' | 'openbox' | null;
+  status: string;
+  created_at: string;
+  updated_at: string | null;
+};
+
+export type OrderEvent = {
+  id: string;
+  deal_id: string | null;
+  actor_id: string | null;
+  event_type: string;
+  detail: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
 };
 
 export type Wallet = {

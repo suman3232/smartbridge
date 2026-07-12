@@ -8,7 +8,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { FadeIn } from "@/components/ui/fade-in";
 import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/hooks/use-toast";
-import { supabase, Deal, KYC, Wallet } from "@/lib/supabase";
+import { supabase, Deal, KYC, Wallet, DEAL_SAFE_COLUMNS } from "@/lib/supabase";
 import {
   PlusCircle,
   ShoppingBag,
@@ -38,7 +38,7 @@ export default function Dashboard() {
         return;
       }
       const [dealsRes, walletRes, kycRes] = await Promise.all([
-        supabase.from("deals").select("*")
+        supabase.from("deals").select(DEAL_SAFE_COLUMNS)
           .or(`merchant_id.eq.${profile.id},customer_id.eq.${profile.id}`)
           .order("created_at", { ascending: false }).limit(6),
         supabase.from("wallets").select("*").eq("user_id", profile.id).maybeSingle(),
@@ -50,7 +50,7 @@ export default function Dashboard() {
       if (firstError) {
         toast({ title: "Couldn't load dashboard", description: firstError.message, variant: "destructive" });
       }
-      if (dealsRes.data) setDeals(dealsRes.data as Deal[]);
+      if (dealsRes.data) setDeals(dealsRes.data as unknown as Deal[]);
       if (walletRes.data) setWallet(walletRes.data as Wallet);
       if (kycRes.data) setKyc(kycRes.data as KYC);
       setLoading(false);

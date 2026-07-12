@@ -123,10 +123,31 @@ CREATE TABLE IF NOT EXISTS public.deals (
   required_card TEXT NOT NULL,
   delivery_address TEXT,
   admin_contact_number TEXT,
+  -- Structured delivery fields. The cardholder is shown these (recipient + address)
+  -- to place the order, but NEVER the buyer's private phone — the buyer's phone
+  -- lives only in profiles.phone (admin-readable) and is never copied here.
+  recipient_name TEXT,
+  address_line TEXT,
+  city TEXT,
+  state TEXT,
+  pincode TEXT,
+  delivery_instructions TEXT,
   -- 30-minute reservation window (set on accept, cleared on order/expiry/release).
   -- reserved_until is the server-side source of truth for the countdown.
   reserved_at TIMESTAMPTZ,
   reserved_until TIMESTAMPTZ,
+  -- Fulfilment lifecycle (order → shipping → payment → delivery → settlement).
+  estimated_delivery_date DATE,             -- authoritative; drives payment_due_date
+  payment_due_date DATE,                    -- = estimated_delivery_date - 1 day
+  payment_status TEXT NOT NULL DEFAULT 'not_due'
+    CHECK (payment_status IN ('not_due','due_soon','due','overdue','submitted','verified','refunded','disputed')),
+  payment_reference TEXT,
+  payment_proof_url TEXT,
+  payment_submitted_at TIMESTAMPTZ,
+  payment_verified_at TIMESTAMPTZ,
+  buyer_confirmed_at TIMESTAMPTZ,           -- buyer confirmed receipt
+  settled_at TIMESTAMPTZ,                   -- wallet credited (idempotency guard)
+  dispute_status TEXT CHECK (dispute_status IN ('open','resolved','rejected')),
   status public.deal_status DEFAULT 'pending',
   admin_notes TEXT,
   created_at TIMESTAMPTZ DEFAULT now(),
@@ -146,6 +167,15 @@ CREATE TABLE IF NOT EXISTS public.orders (
   tracking_id TEXT,
   delivery_otp TEXT,
   otp_verified BOOLEAN DEFAULT false,
+  -- Order proof (mandatory at placement) + shipping (added when it ships).
+  marketplace_order_id TEXT,
+  platform TEXT,
+  amount_paid DECIMAL(10,2),
+  courier TEXT,
+  tracking_url TEXT,
+  shipped_screenshot_url TEXT,
+  -- What the delivery needs; the actual code lives in delivery_codes (payment-gated).
+  delivery_code_type TEXT DEFAULT 'none' CHECK (delivery_code_type IN ('none','otp','pin','openbox')),
   status public.order_status DEFAULT 'placed',
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
@@ -305,6 +335,60 @@ CREATE TABLE IF NOT EXISTS public.cardholder_reliability (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- ---------------------------------------------------------------------------
+-- Fulfilment: delivery codes (payment-gated), order audit trail, email outbox
+-- ---------------------------------------------------------------------------
+-- The actual delivery OTP/PIN/open-box code. Kept in its OWN table with NO client
+-- SELECT policy so it can never be read directly (RLS is row-level, not column-
+-- level — putting it on orders, which participants can read, would defeat the
+-- payment gate). It is written and read ONLY via SECURITY DEFINER RPCs that
+-- enforce payment verification, expiry, and access logging.
+CREATE TABLE IF NOT EXISTS public.delivery_codes (
+  deal_id UUID PRIMARY KEY REFERENCES public.deals(id) ON DELETE CASCADE,
+  code_type TEXT NOT NULL CHECK (code_type IN ('otp','pin','openbox')),
+  code_value TEXT NOT NULL,
+  set_by UUID REFERENCES public.profiles(id),
+  expires_at TIMESTAMPTZ,
+  first_released_at TIMESTAMPTZ,   -- first time the buyer was allowed to view it
+  cleared_at TIMESTAMPTZ,          -- value scrubbed after delivery confirmed
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Immutable audit trail for the whole order lifecycle (who did what, when).
+CREATE TABLE IF NOT EXISTS public.order_events (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  deal_id UUID REFERENCES public.deals(id) ON DELETE CASCADE,
+  actor_id UUID REFERENCES public.profiles(id),
+  event_type TEXT NOT NULL,
+  detail TEXT,
+  metadata JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS order_events_deal_idx ON public.order_events (deal_id, created_at DESC);
+
+-- Queued transactional emails. In-app notifications are delivered immediately;
+-- email requires an external sender, so rows are queued here (idempotent via
+-- dedup_key) for an edge function / cron to drain once SMTP is configured.
+CREATE TABLE IF NOT EXISTS public.email_outbox (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  to_user_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE,
+  to_email TEXT,
+  subject TEXT NOT NULL,
+  body TEXT NOT NULL,
+  dedup_key TEXT UNIQUE,
+  status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','sent','failed')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  sent_at TIMESTAMPTZ
+);
+
+-- Idempotent notifications: a unique key prevents duplicate reminders from
+-- repeated sweeps / retries / refreshes.
+ALTER TABLE public.notifications ADD COLUMN IF NOT EXISTS dedup_key TEXT;
+DO $$ BEGIN
+  CREATE UNIQUE INDEX notifications_dedup_key_idx ON public.notifications (dedup_key) WHERE dedup_key IS NOT NULL;
+EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL; END $$;
+
 -- One referral per referred user, ever. Reward fires only on qualification.
 CREATE TABLE IF NOT EXISTS public.referrals (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -360,6 +444,26 @@ ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS delivery_address TEXT;
 ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS admin_contact_number TEXT;
 ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS reserved_at TIMESTAMPTZ;
 ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS reserved_until TIMESTAMPTZ;
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS recipient_name TEXT;
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS address_line TEXT;
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS city TEXT;
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS state TEXT;
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS pincode TEXT;
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS delivery_instructions TEXT;
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS estimated_delivery_date DATE;
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS payment_due_date DATE;
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS payment_status TEXT NOT NULL DEFAULT 'not_due';
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS payment_reference TEXT;
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS payment_proof_url TEXT;
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS payment_submitted_at TIMESTAMPTZ;
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS payment_verified_at TIMESTAMPTZ;
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS buyer_confirmed_at TIMESTAMPTZ;
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS settled_at TIMESTAMPTZ;
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS dispute_status TEXT;
+DO $$ BEGIN
+  ALTER TABLE public.deals ADD CONSTRAINT deals_payment_status_chk
+    CHECK (payment_status IN ('not_due','due_soon','due','overdue','submitted','verified','refunded','disputed')) NOT VALID;
+EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL; END $$;
 ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS status public.deal_status DEFAULT 'pending';
 ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS admin_notes TEXT;
 ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now();
@@ -369,6 +473,13 @@ ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS order_screenshot_url TEXT;
 ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS tracking_id TEXT;
 ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS delivery_otp TEXT;
 ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS otp_verified BOOLEAN DEFAULT false;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS marketplace_order_id TEXT;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS platform TEXT;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS amount_paid DECIMAL(10,2);
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS courier TEXT;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS tracking_url TEXT;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS shipped_screenshot_url TEXT;
+ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS delivery_code_type TEXT DEFAULT 'none';
 ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS status public.order_status DEFAULT 'placed';
 ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now();
 ALTER TABLE public.orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
@@ -449,6 +560,9 @@ ALTER TABLE public.app_settings          ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.reservation_config     ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.reservation_events     ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.cardholder_reliability ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.delivery_codes         ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.order_events           ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.email_outbox           ENABLE ROW LEVEL SECURITY;
 
 -- ---------------------------------------------------------------------------
 -- Core security-definer helpers (needed by policies below)
@@ -564,6 +678,18 @@ CREATE POLICY "Participants can view their deals" ON public.deals
 DROP POLICY IF EXISTS "Admins can view all deals" ON public.deals;
 CREATE POLICY "Admins can view all deals" ON public.deals
   FOR SELECT USING (public.is_admin(auth.uid()));
+-- SECURITY (buyer phone privacy): RLS is ROW-level, so the participant SELECT
+-- policy above would otherwise hand the card holder the RAW delivery PII columns
+-- (which can contain the buyer's phone) on a direct `from('deals').select(...)`,
+-- bypassing every RPC-level redaction. COLUMN-level REVOKE closes that: clients
+-- (authenticated/anon) can no longer read these columns directly. Participants get
+-- what they need through SECURITY DEFINER RPCs (owner-run, so unaffected by this):
+-- the buyer + admins via get_deal_for_viewer, the card holder via the sanitized
+-- get_order_delivery_details, admins via admin_order_search. INSERT is unaffected,
+-- so posting a deal still works (CreateDeal does not read the row back).
+REVOKE SELECT (delivery_address, recipient_name, address_line, city, state, pincode,
+               delivery_instructions, payment_reference, payment_proof_url)
+  ON public.deals FROM anon, authenticated;
 -- SECURITY: a user may only create their OWN deal, only in 'pending' status, and
 -- only once their email is verified (blocks self-approval + unverified posting).
 DROP POLICY IF EXISTS "Users can create deals" ON public.deals;
@@ -713,6 +839,25 @@ CREATE POLICY "Own or admin reservation events" ON public.reservation_events
 DROP POLICY IF EXISTS "Own or admin reliability" ON public.cardholder_reliability;
 CREATE POLICY "Own or admin reliability" ON public.cardholder_reliability
   FOR SELECT USING (user_id = auth.uid() OR public.is_admin(auth.uid()));
+
+-- delivery_codes: NO select/insert/update policy on purpose. Even the buyer and
+-- the assigned cardholder cannot read the code column directly — it is returned
+-- only by get_delivery_code (SECURITY DEFINER), which enforces the payment gate.
+-- (RLS enabled + zero policies = deny all direct access.)
+
+-- order_events: participants of the deal + admins can read; writes via RPC only.
+DROP POLICY IF EXISTS "Participants or admin read order events" ON public.order_events;
+CREATE POLICY "Participants or admin read order events" ON public.order_events
+  FOR SELECT USING (
+    public.is_admin(auth.uid())
+    OR EXISTS (SELECT 1 FROM public.deals d WHERE d.id = order_events.deal_id
+               AND (d.merchant_id = auth.uid() OR d.customer_id = auth.uid()))
+  );
+
+-- email_outbox: admin-only visibility; rows written by SECURITY DEFINER RPCs.
+DROP POLICY IF EXISTS "Admins read email outbox" ON public.email_outbox;
+CREATE POLICY "Admins read email outbox" ON public.email_outbox
+  FOR SELECT USING (public.is_admin(auth.uid()));
 
 -- ---------------------------------------------------------------------------
 -- Utility + signup trigger functions
@@ -942,22 +1087,43 @@ BEGIN
 END;
 $$;
 
+DROP FUNCTION IF EXISTS public.place_deal_order(uuid, text, text);
 CREATE OR REPLACE FUNCTION public.place_deal_order(
-  p_deal_id UUID, p_tracking_id TEXT DEFAULT NULL, p_order_screenshot_url TEXT DEFAULT NULL)
+  p_deal_id UUID,
+  p_tracking_id TEXT DEFAULT NULL,
+  p_order_screenshot_url TEXT DEFAULT NULL,
+  p_marketplace_order_id TEXT DEFAULT NULL,
+  p_platform TEXT DEFAULT NULL,
+  p_estimated_delivery_date DATE DEFAULT NULL,
+  p_amount_paid DECIMAL DEFAULT NULL,
+  p_delivery_code_type TEXT DEFAULT 'none')
 RETURNS public.orders LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE
   deal_record public.deals;
   new_order public.orders;
+  v_due DATE;
+  v_pstatus TEXT;
 BEGIN
   IF NOT public.is_verified() THEN
     RAISE EXCEPTION 'Please verify your email before placing an order';
   END IF;
 
-  -- Valid initial proof is required: at least a tracking id or an order screenshot.
-  -- This rejects empty "fake" submissions made only to stop the timer.
-  IF NULLIF(TRIM(COALESCE(p_tracking_id, '')), '') IS NULL
-     AND NULLIF(TRIM(COALESCE(p_order_screenshot_url, '')), '') IS NULL THEN
-    RAISE EXCEPTION 'Add a tracking ID or an order screenshot as proof before submitting';
+  -- Mandatory order proof: screenshot + marketplace order id + estimated delivery
+  -- date. Empty/fake submissions to merely stop the timer are rejected.
+  IF NULLIF(TRIM(COALESCE(p_order_screenshot_url, '')), '') IS NULL THEN
+    RAISE EXCEPTION 'An order screenshot is required as proof';
+  END IF;
+  IF NULLIF(TRIM(COALESCE(p_marketplace_order_id, '')), '') IS NULL THEN
+    RAISE EXCEPTION 'The marketplace order ID is required';
+  END IF;
+  IF p_estimated_delivery_date IS NULL THEN
+    RAISE EXCEPTION 'The estimated delivery date is required';
+  END IF;
+  IF p_estimated_delivery_date < CURRENT_DATE THEN
+    RAISE EXCEPTION 'The estimated delivery date cannot be in the past';
+  END IF;
+  IF COALESCE(p_delivery_code_type, 'none') NOT IN ('none','otp','pin','openbox') THEN
+    RAISE EXCEPTION 'Invalid delivery code type';
   END IF;
 
   SELECT * INTO deal_record FROM public.deals WHERE id = p_deal_id FOR UPDATE;
@@ -965,10 +1131,8 @@ BEGIN
   IF deal_record.customer_id != auth.uid() THEN
     RAISE EXCEPTION 'Only the card holder who reserved this deal can place the order';
   END IF;
-  -- Server-side timer: a lapsed window rejects the proof. The expiry itself is
-  -- deliberately NOT performed here — this RAISE would roll it back in the same
-  -- transaction. It is persisted by the sweeps (browse feed, new accepts, and
-  -- the client's countdown/error handlers calling expire_stale_reservations).
+  -- Server-side timer: a lapsed window rejects the proof (the expiry itself is
+  -- persisted by the sweeps, not here — a RAISE would roll it back).
   IF deal_record.status = 'accepted' AND deal_record.reserved_until IS NOT NULL
      AND deal_record.reserved_until < now() THEN
     RAISE EXCEPTION 'Your reservation window has expired. The deal is reopening for other card holders.';
@@ -980,20 +1144,46 @@ BEGIN
     RAISE EXCEPTION 'Order already placed for this deal';
   END IF;
 
-  INSERT INTO public.orders (deal_id, customer_id, tracking_id, order_screenshot_url, status)
-  VALUES (p_deal_id, auth.uid(), NULLIF(TRIM(p_tracking_id), ''), NULLIF(TRIM(p_order_screenshot_url), ''), 'placed')
+  INSERT INTO public.orders (deal_id, customer_id, tracking_id, order_screenshot_url,
+    marketplace_order_id, platform, amount_paid, delivery_code_type, status)
+  VALUES (p_deal_id, auth.uid(), NULLIF(TRIM(p_tracking_id), ''), NULLIF(TRIM(p_order_screenshot_url), ''),
+    TRIM(p_marketplace_order_id), NULLIF(TRIM(COALESCE(p_platform, '')), ''), p_amount_paid,
+    COALESCE(p_delivery_code_type, 'none'), 'placed')
   RETURNING * INTO new_order;
 
-  -- Advance the lifecycle and stop the reservation countdown.
-  UPDATE public.deals SET status = 'in_progress', reserved_at = NULL, reserved_until = NULL, updated_at = now()
+  -- Payment becomes due one day before the estimated delivery date.
+  v_due := p_estimated_delivery_date - 1;
+  v_pstatus := CASE
+    WHEN CURRENT_DATE > v_due THEN 'overdue'
+    WHEN CURRENT_DATE >= v_due THEN 'due'
+    WHEN v_due - CURRENT_DATE <= 2 THEN 'due_soon'
+    ELSE 'not_due' END;
+
+  -- Advance the lifecycle, stop the countdown, set the payment schedule.
+  UPDATE public.deals SET
+    status = 'in_progress', reserved_at = NULL, reserved_until = NULL,
+    estimated_delivery_date = p_estimated_delivery_date, payment_due_date = v_due,
+    payment_status = CASE WHEN payment_status IN ('submitted','verified','refunded') THEN payment_status ELSE v_pstatus END,
+    updated_at = now()
   WHERE id = p_deal_id;
 
   INSERT INTO public.reservation_events (deal_id, user_id, event_type, reserved_at, reserved_until, detail)
   VALUES (p_deal_id, auth.uid(), 'fulfilled', deal_record.reserved_at, deal_record.reserved_until, 'Order proof submitted within the window');
 
-  INSERT INTO public.notifications (user_id, title, message, type, link)
-  VALUES (deal_record.merchant_id, 'Order Placed',
-    'The card holder placed the order for "' || deal_record.product_name || '".', 'info', '/deals/' || p_deal_id);
+  PERFORM public.log_order_event(p_deal_id, auth.uid(), 'order_placed',
+    'Order ' || TRIM(p_marketplace_order_id) || ' placed; est. delivery ' || to_char(p_estimated_delivery_date, 'DD Mon YYYY'),
+    jsonb_build_object('order_id', TRIM(p_marketplace_order_id), 'platform', p_platform, 'estimated_delivery', p_estimated_delivery_date, 'delivery_code_type', COALESCE(p_delivery_code_type,'none')));
+
+  PERFORM public.notify_and_email(deal_record.merchant_id,
+    'Order placed',
+    'Your order for "' || deal_record.product_name || '" is placed. Estimated delivery ' || to_char(p_estimated_delivery_date, 'DD Mon YYYY')
+      || '. Payment of ₹' || deal_record.expected_buy_price || ' is due by ' || to_char(v_due, 'DD Mon YYYY') || '.',
+    'success', '/deals/' || p_deal_id,
+    'order_placed:' || p_deal_id,
+    'Your OfferBridge order has been placed',
+    'Your order for "' || deal_record.product_name || '" has been placed. Estimated delivery: '
+      || to_char(p_estimated_delivery_date, 'DD Mon YYYY') || '. Payment of ₹' || deal_record.expected_buy_price
+      || ' is due by ' || to_char(v_due, 'DD Mon YYYY') || '.');
 
   RETURN new_order;
 END;
@@ -1081,9 +1271,26 @@ BEGIN
     RAISE EXCEPTION 'Only admins can complete deals';
   END IF;
 
+  -- New-flow settlement gates (only for deals that went through the order
+  -- lifecycle — estimated_delivery_date is set). Legacy in-progress deals with
+  -- NULL fulfilment fields settle exactly as before (no regression).
+  SELECT * INTO deal_record FROM public.deals WHERE id = p_deal_id FOR UPDATE;
+  IF deal_record IS NULL THEN RAISE EXCEPTION 'Deal not found'; END IF;
+  IF deal_record.estimated_delivery_date IS NOT NULL THEN
+    IF deal_record.dispute_status = 'open' THEN
+      RAISE EXCEPTION 'Resolve the open dispute before settling this deal';
+    END IF;
+    IF deal_record.payment_status <> 'verified' THEN
+      RAISE EXCEPTION 'Buyer payment must be verified before settlement';
+    END IF;
+    IF deal_record.buyer_confirmed_at IS NULL THEN
+      RAISE EXCEPTION 'The buyer must confirm receipt before settlement';
+    END IF;
+  END IF;
+
   -- Atomic transition: only ONE concurrent caller can flip in_progress->completed,
   -- so the wallet is credited exactly once (no double-payout on double-click / two admins).
-  UPDATE public.deals SET status = 'completed', updated_at = now()
+  UPDATE public.deals SET status = 'completed', settled_at = now(), updated_at = now()
   WHERE id = p_deal_id AND status = 'in_progress'
   RETURNING * INTO deal_record;
 
@@ -1352,6 +1559,470 @@ BEGIN
 END;
 $$;
 
+-- ===========================================================================
+-- Order fulfilment lifecycle: proof → shipping → payment → delivery code →
+-- confirmation → settlement. Buyer phone is NEVER exposed to the card holder.
+-- ===========================================================================
+
+-- Dual-channel, idempotent notify: an in-app notification (delivered now) + a
+-- queued email (drained by an external sender). dedup_key makes both safe to
+-- re-run. Internal only.
+CREATE OR REPLACE FUNCTION public.notify_and_email(
+  p_user_id UUID, p_title TEXT, p_message TEXT, p_type TEXT, p_link TEXT,
+  p_dedup_key TEXT, p_email_subject TEXT, p_email_body TEXT)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_email TEXT;
+BEGIN
+  IF p_user_id IS NULL THEN RETURN; END IF;
+  INSERT INTO public.notifications (user_id, title, message, type, link, dedup_key)
+  VALUES (p_user_id, p_title, p_message, p_type, p_link, p_dedup_key)
+  ON CONFLICT (dedup_key) WHERE dedup_key IS NOT NULL DO NOTHING;
+
+  IF p_email_subject IS NOT NULL THEN
+    SELECT email INTO v_email FROM public.profiles WHERE id = p_user_id;
+    INSERT INTO public.email_outbox (to_user_id, to_email, subject, body, dedup_key)
+    VALUES (p_user_id, v_email, p_email_subject, p_email_body,
+            CASE WHEN p_dedup_key IS NULL THEN NULL ELSE 'email:' || p_dedup_key END)
+    ON CONFLICT (dedup_key) DO NOTHING;
+  END IF;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.notify_and_email(UUID, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
+
+CREATE OR REPLACE FUNCTION public.log_order_event(
+  p_deal_id UUID, p_actor UUID, p_event_type TEXT, p_detail TEXT DEFAULT NULL, p_metadata JSONB DEFAULT NULL)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  INSERT INTO public.order_events (deal_id, actor_id, event_type, detail, metadata)
+  VALUES (p_deal_id, p_actor, p_event_type, p_detail, p_metadata);
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.log_order_event(UUID, UUID, TEXT, TEXT, JSONB) FROM PUBLIC, anon, authenticated;
+
+-- Mask phone-like number runs in free text (defence for buyer-entered fields
+-- shown to the card holder). Matches 7+ digits with common phone punctuation
+-- ( space . - / ( ) ) between them; a 6-digit PIN stays intact.
+CREATE OR REPLACE FUNCTION public.redact_phones(p_text TEXT)
+RETURNS TEXT LANGUAGE sql IMMUTABLE SET search_path = public AS $$
+  SELECT CASE WHEN p_text IS NULL THEN NULL
+    ELSE regexp_replace(p_text, '\+?\d[\d\s.\-/()]{5,}\d', '[contact hidden]', 'g') END;
+$$;
+
+-- Sanitized delivery details for the ASSIGNED CARD HOLDER to place the order.
+-- Returns the recipient + address + the configured OfferBridge support/delivery
+-- number — and NEVER the buyer's private phone. If no support number is
+-- configured it RAISES rather than leaking the buyer's number.
+CREATE OR REPLACE FUNCTION public.get_order_delivery_details(p_deal_id UUID)
+RETURNS TABLE (
+  recipient_name TEXT, address_line TEXT, city TEXT, state TEXT, pincode TEXT,
+  delivery_instructions TEXT, legacy_address TEXT, offerbridge_contact TEXT
+) LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE d public.deals; support TEXT; is_adm BOOLEAN;
+BEGIN
+  IF auth.uid() IS NULL THEN RAISE EXCEPTION 'Sign in to continue'; END IF;
+  SELECT * INTO d FROM public.deals WHERE id = p_deal_id;
+  IF d IS NULL THEN RAISE EXCEPTION 'Deal not found'; END IF;
+  is_adm := public.is_admin(auth.uid());
+  -- IS DISTINCT FROM so a NULL auth.uid() never slips past (x != NULL = NULL).
+  IF d.customer_id IS DISTINCT FROM auth.uid() AND NOT is_adm THEN
+    RAISE EXCEPTION 'Only the assigned card holder can view the delivery details';
+  END IF;
+
+  SELECT support_whatsapp INTO support FROM public.app_settings WHERE id = true;
+  IF NULLIF(TRIM(COALESCE(support, '')), '') IS NULL THEN
+    -- Never fall back to the buyer's real number. Block and tell the admin.
+    RAISE EXCEPTION 'OfferBridge delivery/support number is not configured. An admin must set it in the Admin Panel before orders can be placed.';
+  END IF;
+
+  -- Redact any phone-like run from EVERY free-text field returned to the card
+  -- holder (not just the legacy blob) — a buyer might type a number into the
+  -- address line or instructions. Runs of 7+ digits separated by common
+  -- punctuation are masked; a 6-digit PIN is short enough not to match.
+  RETURN QUERY SELECT
+    d.recipient_name,
+    CASE WHEN is_adm THEN d.address_line ELSE public.redact_phones(d.address_line) END,
+    d.city, d.state, d.pincode,
+    CASE WHEN is_adm THEN d.delivery_instructions ELSE public.redact_phones(d.delivery_instructions) END,
+    CASE WHEN is_adm THEN d.delivery_address ELSE public.redact_phones(d.delivery_address) END,
+    support;
+END;
+$$;
+
+-- Card holder updates shipping after the order ships. Estimated delivery date is
+-- mandatory and editable; changing it recomputes the payment deadline + notifies.
+CREATE OR REPLACE FUNCTION public.update_shipping(
+  p_deal_id UUID, p_courier TEXT, p_tracking_id TEXT, p_tracking_url TEXT DEFAULT NULL,
+  p_estimated_delivery_date DATE DEFAULT NULL, p_shipped_screenshot_url TEXT DEFAULT NULL,
+  p_delivery_code_type TEXT DEFAULT NULL)
+RETURNS public.orders LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE d public.deals; ord public.orders; v_due DATE; date_changed BOOLEAN;
+BEGIN
+  IF auth.uid() IS NULL THEN RAISE EXCEPTION 'Sign in to continue'; END IF;
+  SELECT * INTO d FROM public.deals WHERE id = p_deal_id FOR UPDATE;
+  IF d IS NULL THEN RAISE EXCEPTION 'Deal not found'; END IF;
+  IF d.customer_id IS DISTINCT FROM auth.uid() THEN
+    RAISE EXCEPTION 'Only the assigned card holder can update shipping';
+  END IF;
+  IF d.status NOT IN ('in_progress') THEN
+    RAISE EXCEPTION 'Shipping can only be updated after the order is placed';
+  END IF;
+  IF NULLIF(TRIM(COALESCE(p_courier, '')), '') IS NULL THEN RAISE EXCEPTION 'Courier is required'; END IF;
+  IF NULLIF(TRIM(COALESCE(p_tracking_id, '')), '') IS NULL THEN RAISE EXCEPTION 'Tracking ID / AWB is required'; END IF;
+  IF p_estimated_delivery_date IS NULL THEN RAISE EXCEPTION 'The estimated delivery date is required'; END IF;
+
+  UPDATE public.orders SET
+    courier = TRIM(p_courier), tracking_id = TRIM(p_tracking_id),
+    tracking_url = NULLIF(TRIM(COALESCE(p_tracking_url, '')), ''),
+    shipped_screenshot_url = COALESCE(NULLIF(TRIM(COALESCE(p_shipped_screenshot_url, '')), ''), shipped_screenshot_url),
+    delivery_code_type = COALESCE(NULLIF(p_delivery_code_type, ''), delivery_code_type),
+    status = 'shipped', updated_at = now()
+  WHERE deal_id = p_deal_id RETURNING * INTO ord;
+  IF ord IS NULL THEN RAISE EXCEPTION 'No order to ship for this deal'; END IF;
+
+  date_changed := d.estimated_delivery_date IS DISTINCT FROM p_estimated_delivery_date;
+  v_due := p_estimated_delivery_date - 1;
+  UPDATE public.deals SET
+    estimated_delivery_date = p_estimated_delivery_date, payment_due_date = v_due,
+    payment_status = CASE
+      WHEN payment_status IN ('submitted','verified','refunded','disputed') THEN payment_status
+      WHEN CURRENT_DATE > v_due THEN 'overdue'
+      WHEN CURRENT_DATE >= v_due THEN 'due'
+      WHEN v_due - CURRENT_DATE <= 2 THEN 'due_soon'
+      ELSE 'not_due' END,
+    updated_at = now()
+  WHERE id = p_deal_id;
+
+  PERFORM public.log_order_event(p_deal_id, auth.uid(), 'shipped',
+    'Shipped via ' || TRIM(p_courier) || ' (' || TRIM(p_tracking_id) || ')'
+      || CASE WHEN date_changed THEN '; est. delivery now ' || to_char(p_estimated_delivery_date, 'DD Mon YYYY') ELSE '' END,
+    jsonb_build_object('courier', TRIM(p_courier), 'tracking_id', TRIM(p_tracking_id), 'estimated_delivery', p_estimated_delivery_date));
+
+  PERFORM public.notify_and_email(d.merchant_id, 'Order shipped',
+    'Your order for "' || d.product_name || '" shipped via ' || TRIM(p_courier) || '. Tracking ' || TRIM(p_tracking_id)
+      || '. Estimated delivery ' || to_char(p_estimated_delivery_date, 'DD Mon YYYY') || '; payment due ' || to_char(v_due, 'DD Mon YYYY') || '.',
+    'info', '/deals/' || p_deal_id,
+    'shipped:' || p_deal_id || ':' || TRIM(p_tracking_id),
+    'Your OfferBridge order has shipped',
+    'Your order for "' || d.product_name || '" has shipped via ' || TRIM(p_courier) || ' (tracking ' || TRIM(p_tracking_id)
+      || '). Estimated delivery ' || to_char(p_estimated_delivery_date, 'DD Mon YYYY') || '. Payment of ₹' || d.expected_buy_price || ' is due by ' || to_char(v_due, 'DD Mon YYYY') || '.');
+
+  IF date_changed THEN
+    PERFORM public.notify_and_email(d.merchant_id, 'Delivery date updated',
+      'The estimated delivery for "' || d.product_name || '" changed to ' || to_char(p_estimated_delivery_date, 'DD Mon YYYY')
+        || '. Payment is now due by ' || to_char(v_due, 'DD Mon YYYY') || '.',
+      'info', '/deals/' || p_deal_id,
+      'edd_changed:' || p_deal_id || ':' || p_estimated_delivery_date,
+      'Delivery date updated for your OfferBridge order',
+      'The estimated delivery date for "' || d.product_name || '" is now ' || to_char(p_estimated_delivery_date, 'DD Mon YYYY')
+        || '. Your payment of ₹' || d.expected_buy_price || ' is due by ' || to_char(v_due, 'DD Mon YYYY') || '.');
+  END IF;
+
+  RETURN ord;
+END;
+$$;
+
+-- Buyer submits payment proof (admin-mediated model — no gateway; admin verifies).
+CREATE OR REPLACE FUNCTION public.submit_buyer_payment(
+  p_deal_id UUID, p_reference TEXT, p_proof_url TEXT DEFAULT NULL)
+RETURNS public.deals LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE d public.deals;
+BEGIN
+  IF auth.uid() IS NULL THEN RAISE EXCEPTION 'Sign in to continue'; END IF;
+  SELECT * INTO d FROM public.deals WHERE id = p_deal_id FOR UPDATE;
+  IF d IS NULL THEN RAISE EXCEPTION 'Deal not found'; END IF;
+  IF d.merchant_id IS DISTINCT FROM auth.uid() THEN RAISE EXCEPTION 'Only the buyer can submit payment for this order'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM public.orders WHERE deal_id = p_deal_id) THEN
+    RAISE EXCEPTION 'You can pay after the card holder has placed the order';
+  END IF;
+  IF d.payment_status = 'verified' THEN RAISE EXCEPTION 'Payment is already verified'; END IF;
+  IF NULLIF(TRIM(COALESCE(p_reference, '')), '') IS NULL AND NULLIF(TRIM(COALESCE(p_proof_url, '')), '') IS NULL THEN
+    RAISE EXCEPTION 'Add a payment reference or upload a payment screenshot';
+  END IF;
+
+  UPDATE public.deals SET
+    payment_status = 'submitted', payment_reference = NULLIF(TRIM(COALESCE(p_reference,'')),''),
+    payment_proof_url = NULLIF(TRIM(COALESCE(p_proof_url,'')),''), payment_submitted_at = now(), updated_at = now()
+  WHERE id = p_deal_id RETURNING * INTO d;
+
+  PERFORM public.log_order_event(p_deal_id, auth.uid(), 'payment_submitted', 'Buyer submitted payment proof', NULL);
+
+  -- Notify all admins so someone verifies it.
+  PERFORM public.notify_and_email(ur.user_id, 'Payment awaiting verification',
+    'Buyer submitted payment for "' || d.product_name || '" (₹' || d.expected_buy_price || '). Please verify.',
+    'info', '/admin', NULL, NULL, NULL)
+  FROM public.user_roles ur WHERE ur.role = 'admin';
+
+  RETURN d;
+END;
+$$;
+
+-- Admin verifies (or rejects) the buyer's payment.
+CREATE OR REPLACE FUNCTION public.admin_verify_payment(p_deal_id UUID, p_approve BOOLEAN, p_notes TEXT DEFAULT NULL)
+RETURNS public.deals LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE d public.deals;
+BEGIN
+  IF NOT public.is_admin(auth.uid()) THEN RAISE EXCEPTION 'Only admins can verify payments'; END IF;
+  SELECT * INTO d FROM public.deals WHERE id = p_deal_id FOR UPDATE;
+  IF d IS NULL THEN RAISE EXCEPTION 'Deal not found'; END IF;
+
+  IF p_approve THEN
+    UPDATE public.deals SET payment_status = 'verified', payment_verified_at = now(),
+      admin_notes = COALESCE(p_notes, admin_notes), updated_at = now()
+    WHERE id = p_deal_id RETURNING * INTO d;
+    PERFORM public.log_order_event(p_deal_id, auth.uid(), 'payment_verified', p_notes, NULL);
+    PERFORM public.notify_and_email(d.merchant_id, 'Payment verified',
+      'Your payment for "' || d.product_name || '" is verified. Any delivery OTP/PIN can now be released to you.',
+      'success', '/deals/' || p_deal_id, 'payment_verified:' || p_deal_id,
+      'Your OfferBridge payment is verified',
+      'Your payment for "' || d.product_name || '" has been verified.');
+  ELSE
+    UPDATE public.deals SET payment_status = CASE WHEN payment_due_date IS NOT NULL AND CURRENT_DATE > payment_due_date THEN 'overdue' ELSE 'due' END,
+      admin_notes = COALESCE(p_notes, admin_notes), updated_at = now()
+    WHERE id = p_deal_id RETURNING * INTO d;
+    PERFORM public.log_order_event(p_deal_id, auth.uid(), 'payment_rejected', p_notes, NULL);
+    PERFORM public.notify_and_email(d.merchant_id, 'Payment not verified',
+      'Your payment for "' || d.product_name || '" could not be verified. ' || COALESCE(p_notes, 'Please re-submit.'),
+      'error', '/deals/' || p_deal_id, NULL,
+      'Action needed: OfferBridge payment not verified',
+      'Your payment for "' || d.product_name || '" could not be verified. ' || COALESCE(p_notes, 'Please re-submit.'));
+  END IF;
+  RETURN d;
+END;
+$$;
+
+-- Card holder records the delivery OTP/PIN/open-box code (written to the locked
+-- delivery_codes table; never readable directly by anyone).
+CREATE OR REPLACE FUNCTION public.set_delivery_code(
+  p_deal_id UUID, p_code_type TEXT, p_code_value TEXT, p_ttl_minutes INT DEFAULT 1440)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE d public.deals;
+BEGIN
+  IF auth.uid() IS NULL THEN RAISE EXCEPTION 'Sign in to continue'; END IF;
+  SELECT * INTO d FROM public.deals WHERE id = p_deal_id;
+  IF d IS NULL THEN RAISE EXCEPTION 'Deal not found'; END IF;
+  IF d.customer_id IS DISTINCT FROM auth.uid() THEN RAISE EXCEPTION 'Only the assigned card holder can set the delivery code'; END IF;
+  IF p_code_type NOT IN ('otp','pin','openbox') THEN RAISE EXCEPTION 'Invalid delivery code type'; END IF;
+  IF NULLIF(TRIM(COALESCE(p_code_value, '')), '') IS NULL THEN RAISE EXCEPTION 'The code value is required'; END IF;
+
+  INSERT INTO public.delivery_codes (deal_id, code_type, code_value, set_by, expires_at)
+  VALUES (p_deal_id, p_code_type, TRIM(p_code_value), auth.uid(), now() + make_interval(mins => GREATEST(5, COALESCE(p_ttl_minutes, 1440))))
+  ON CONFLICT (deal_id) DO UPDATE SET
+    code_type = EXCLUDED.code_type, code_value = EXCLUDED.code_value, set_by = auth.uid(),
+    expires_at = EXCLUDED.expires_at, cleared_at = NULL, updated_at = now();
+
+  UPDATE public.orders SET delivery_code_type = p_code_type, updated_at = now() WHERE deal_id = p_deal_id;
+  PERFORM public.log_order_event(p_deal_id, auth.uid(), 'delivery_code_set', 'Card holder set a ' || p_code_type || ' delivery code', NULL);
+
+  PERFORM public.notify_and_email(d.merchant_id, 'Delivery code available',
+    CASE WHEN d.payment_status = 'verified'
+      THEN 'A ' || p_code_type || ' is needed for delivery of "' || d.product_name || '". Open the order to view it.'
+      ELSE 'A ' || p_code_type || ' is needed for delivery of "' || d.product_name || '". Complete your payment to unlock it.' END,
+    CASE WHEN d.payment_status = 'verified' THEN 'info' ELSE 'error' END, '/deals/' || p_deal_id,
+    'delivery_code_set:' || p_deal_id, 'Delivery code for your OfferBridge order',
+    'A ' || p_code_type || ' is required for the delivery of "' || d.product_name || '".'
+      || CASE WHEN d.payment_status = 'verified' THEN ' Open your order to view it.' ELSE ' Complete your payment to unlock it.' END);
+END;
+$$;
+
+-- Payment gate: return the delivery code to the buyer ONLY if payment is verified
+-- (or to the card holder who set it, or an admin). Logs every access.
+CREATE OR REPLACE FUNCTION public.get_delivery_code(p_deal_id UUID)
+RETURNS TABLE (code_type TEXT, code_value TEXT, expires_at TIMESTAMPTZ) LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = public AS $$
+DECLARE d public.deals; dc public.delivery_codes; is_buyer BOOLEAN; is_holder BOOLEAN; is_adm BOOLEAN;
+BEGIN
+  -- Hard stop for anon: without this, x = NULL yields NULL (not false) and the
+  -- authorization + payment gate below would fall through, disclosing the code.
+  IF auth.uid() IS NULL THEN RAISE EXCEPTION 'Sign in to continue'; END IF;
+  SELECT * INTO d FROM public.deals WHERE id = p_deal_id;
+  IF d IS NULL THEN RAISE EXCEPTION 'Deal not found'; END IF;
+  is_buyer := COALESCE(d.merchant_id = auth.uid(), false);
+  is_holder := COALESCE(d.customer_id = auth.uid(), false);
+  is_adm := COALESCE(public.is_admin(auth.uid()), false);
+  IF NOT (is_buyer OR is_holder OR is_adm) THEN RAISE EXCEPTION 'Not authorized'; END IF;
+
+  SELECT * INTO dc FROM public.delivery_codes WHERE deal_id = p_deal_id;
+  IF dc IS NULL OR dc.cleared_at IS NOT NULL THEN RAISE EXCEPTION 'No delivery code is available for this order'; END IF;
+  IF dc.expires_at IS NOT NULL AND dc.expires_at < now() THEN RAISE EXCEPTION 'The delivery code has expired. Ask the card holder to re-enter it.'; END IF;
+
+  -- THE PAYMENT GATE: a buyer may only see it once their payment is verified.
+  IF is_buyer AND NOT (is_holder OR is_adm) AND d.payment_status != 'verified' THEN
+    RAISE EXCEPTION 'Complete and get your payment verified to unlock the delivery code.';
+  END IF;
+
+  IF is_buyer AND dc.first_released_at IS NULL THEN
+    UPDATE public.delivery_codes SET first_released_at = now(), updated_at = now() WHERE deal_id = p_deal_id;
+  END IF;
+  PERFORM public.log_order_event(p_deal_id, auth.uid(), 'delivery_code_viewed',
+    CASE WHEN is_buyer THEN 'Buyer' WHEN is_holder THEN 'Card holder' ELSE 'Admin' END || ' viewed the delivery code', NULL);
+
+  RETURN QUERY SELECT dc.code_type, dc.code_value, dc.expires_at;
+END;
+$$;
+
+-- Buyer confirms receipt (required before settlement; the card holder can never
+-- self-confirm and pull money).
+CREATE OR REPLACE FUNCTION public.buyer_confirm_receipt(p_deal_id UUID)
+RETURNS public.deals LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE d public.deals;
+BEGIN
+  IF auth.uid() IS NULL THEN RAISE EXCEPTION 'Sign in to continue'; END IF;
+  SELECT * INTO d FROM public.deals WHERE id = p_deal_id FOR UPDATE;
+  IF d IS NULL THEN RAISE EXCEPTION 'Deal not found'; END IF;
+  IF d.merchant_id IS DISTINCT FROM auth.uid() THEN RAISE EXCEPTION 'Only the buyer can confirm receipt'; END IF;
+  IF d.status != 'in_progress' THEN RAISE EXCEPTION 'This order is not awaiting delivery confirmation'; END IF;
+  IF d.buyer_confirmed_at IS NOT NULL THEN RETURN d; END IF;
+
+  UPDATE public.deals SET buyer_confirmed_at = now(), updated_at = now() WHERE id = p_deal_id RETURNING * INTO d;
+
+  -- Scrub the delivery code once delivery is confirmed (minimal exposure).
+  UPDATE public.delivery_codes SET code_value = '', cleared_at = now(), updated_at = now()
+  WHERE deal_id = p_deal_id AND cleared_at IS NULL;
+  UPDATE public.orders SET status = 'delivered', updated_at = now() WHERE deal_id = p_deal_id;
+
+  PERFORM public.log_order_event(p_deal_id, auth.uid(), 'buyer_confirmed', 'Buyer confirmed receipt', NULL);
+  PERFORM public.notify_and_email(d.customer_id, 'Buyer confirmed delivery',
+    'The buyer confirmed receipt of "' || d.product_name || '". Settlement will be processed by an admin.',
+    'success', '/deals/' || p_deal_id, 'buyer_confirmed:' || p_deal_id,
+    'Delivery confirmed for your OfferBridge order',
+    'The buyer confirmed receipt of "' || d.product_name || '". Your reimbursement + commission will be settled by an admin.');
+  RETURN d;
+END;
+$$;
+
+-- Buyer or card holder raises a dispute; blocks settlement until an admin resolves.
+CREATE OR REPLACE FUNCTION public.raise_dispute(p_deal_id UUID, p_reason TEXT)
+RETURNS public.deals LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE d public.deals;
+BEGIN
+  IF auth.uid() IS NULL THEN RAISE EXCEPTION 'Sign in to continue'; END IF;
+  SELECT * INTO d FROM public.deals WHERE id = p_deal_id FOR UPDATE;
+  IF d IS NULL THEN RAISE EXCEPTION 'Deal not found'; END IF;
+  IF d.merchant_id IS DISTINCT FROM auth.uid() AND d.customer_id IS DISTINCT FROM auth.uid() THEN
+    RAISE EXCEPTION 'Only a participant of this deal can raise a dispute';
+  END IF;
+  IF NULLIF(TRIM(COALESCE(p_reason, '')), '') IS NULL THEN RAISE EXCEPTION 'Describe the issue'; END IF;
+  IF d.settled_at IS NOT NULL THEN RAISE EXCEPTION 'This deal is already settled'; END IF;
+
+  UPDATE public.deals SET dispute_status = 'open', payment_status = CASE WHEN payment_status = 'verified' THEN 'verified' ELSE 'disputed' END,
+    updated_at = now() WHERE id = p_deal_id RETURNING * INTO d;
+  PERFORM public.log_order_event(p_deal_id, auth.uid(), 'dispute_raised', p_reason, NULL);
+  PERFORM public.notify_and_email(ur.user_id, 'Dispute raised',
+    'A dispute was raised on "' || d.product_name || '": ' || p_reason, 'error', '/admin', NULL, NULL, NULL)
+  FROM public.user_roles ur WHERE ur.role = 'admin';
+  RETURN d;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.admin_resolve_dispute(p_deal_id UUID, p_resolution TEXT, p_notes TEXT DEFAULT NULL)
+RETURNS public.deals LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE d public.deals;
+BEGIN
+  IF NOT public.is_admin(auth.uid()) THEN RAISE EXCEPTION 'Only admins can resolve disputes'; END IF;
+  IF p_resolution NOT IN ('resolved','rejected') THEN RAISE EXCEPTION 'Resolution must be resolved or rejected'; END IF;
+  UPDATE public.deals SET dispute_status = p_resolution, admin_notes = COALESCE(p_notes, admin_notes), updated_at = now()
+  WHERE id = p_deal_id RETURNING * INTO d;
+  IF d IS NULL THEN RAISE EXCEPTION 'Deal not found'; END IF;
+  PERFORM public.log_order_event(p_deal_id, auth.uid(), 'dispute_' || p_resolution, p_notes, NULL);
+  PERFORM public.notify_and_email(d.merchant_id, 'Dispute ' || p_resolution,
+    'The dispute on "' || d.product_name || '" was ' || p_resolution || '. ' || COALESCE(p_notes, ''),
+    'info', '/deals/' || p_deal_id, NULL, 'Your OfferBridge dispute was ' || p_resolution,
+    'The dispute on "' || d.product_name || '" was ' || p_resolution || '. ' || COALESCE(p_notes, ''));
+  RETURN d;
+END;
+$$;
+
+-- Idempotent payment-state sweep + reminders. Safe to call from anyone / a cron;
+-- dedup_key makes every reminder fire at most once.
+CREATE OR REPLACE FUNCTION public.recompute_payment_states()
+RETURNS INT LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = public AS $$
+DECLARE r RECORD; n INT := 0; new_status TEXT;
+BEGIN
+  FOR r IN
+    SELECT id, merchant_id, product_name, expected_buy_price, payment_due_date, payment_status, estimated_delivery_date
+    FROM public.deals
+    WHERE status = 'in_progress' AND payment_due_date IS NOT NULL
+  LOOP
+    -- Only the un-settled payment states auto-advance; verified/refunded/disputed
+    -- are left untouched, but the deal is still scanned so a paid buyer still gets
+    -- the expected-delivery-today reminder below.
+    IF r.payment_status IN ('not_due','due_soon','due','overdue') THEN
+      new_status := CASE
+        WHEN CURRENT_DATE > r.payment_due_date THEN 'overdue'
+        WHEN CURRENT_DATE >= r.payment_due_date THEN 'due'
+        WHEN r.payment_due_date - CURRENT_DATE <= 2 THEN 'due_soon'
+        ELSE 'not_due' END;
+      IF new_status IS DISTINCT FROM r.payment_status THEN
+        UPDATE public.deals SET payment_status = new_status, updated_at = now() WHERE id = r.id;
+        n := n + 1;
+      END IF;
+    ELSE
+      new_status := r.payment_status;
+    END IF;
+
+    IF new_status = 'due' THEN
+      PERFORM public.notify_and_email(r.merchant_id, 'Payment due',
+        'Payment of ₹' || r.expected_buy_price || ' for "' || r.product_name || '" is due today (delivery expected ' || to_char(r.estimated_delivery_date, 'DD Mon YYYY') || ').',
+        'error', '/deals/' || r.id, 'pay_due:' || r.id, 'Payment due for your OfferBridge order',
+        'Your payment of ₹' || r.expected_buy_price || ' for "' || r.product_name || '" is due today.');
+    ELSIF new_status = 'overdue' THEN
+      PERFORM public.notify_and_email(r.merchant_id, 'Payment overdue',
+        'Payment of ₹' || r.expected_buy_price || ' for "' || r.product_name || '" is overdue. Delivery is expected ' || to_char(r.estimated_delivery_date, 'DD Mon YYYY') || '.',
+        'error', '/deals/' || r.id, 'pay_overdue:' || r.id, 'Urgent: OfferBridge payment overdue',
+        'Your payment of ₹' || r.expected_buy_price || ' for "' || r.product_name || '" is overdue.');
+    END IF;
+
+    -- Expected-delivery-day reminder (once).
+    IF r.estimated_delivery_date = CURRENT_DATE THEN
+      PERFORM public.notify_and_email(r.merchant_id, 'Expected for delivery today',
+        CASE WHEN new_status = 'verified' THEN 'Your order "' || r.product_name || '" is expected for delivery today. Please remain available.'
+             ELSE 'Your order "' || r.product_name || '" is expected today and ₹' || r.expected_buy_price || ' is still pending. Pay now to unlock any delivery OTP/PIN.' END,
+        'info', '/deals/' || r.id, 'edd_today:' || r.id || ':' || CURRENT_DATE, 'Your OfferBridge order is expected today',
+        'Your order "' || r.product_name || '" is expected for delivery today.');
+    END IF;
+  END LOOP;
+  RETURN n;
+END;
+$$;
+
+-- Admin/support order search (by marketplace order id, tracking, deal id, buyer,
+-- or card holder). Admin-only — this is the ONE place the buyer's private phone is
+-- exposed, for delivery coordination. Does NOT return the delivery code value.
+CREATE OR REPLACE FUNCTION public.admin_order_search(p_query TEXT)
+RETURNS TABLE (
+  deal_id UUID, product_name TEXT, deal_status TEXT,
+  buyer_name TEXT, buyer_phone TEXT, buyer_email TEXT,
+  cardholder_name TEXT, cardholder_phone TEXT,
+  recipient_name TEXT, address_line TEXT, city TEXT, state TEXT, pincode TEXT, legacy_address TEXT,
+  marketplace_order_id TEXT, courier TEXT, tracking_id TEXT,
+  estimated_delivery_date DATE, payment_due_date DATE, payment_status TEXT,
+  delivery_code_type TEXT, dispute_status TEXT, created_at TIMESTAMPTZ
+) LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE q TEXT;
+BEGIN
+  IF NOT public.is_admin(auth.uid()) THEN RAISE EXCEPTION 'Only admins/support can search orders'; END IF;
+  q := '%' || TRIM(COALESCE(p_query, '')) || '%';
+  RETURN QUERY
+  SELECT d.id, d.product_name, d.status::TEXT,
+    bp.full_name, bp.phone, bp.email,
+    cp.full_name, cp.phone,
+    d.recipient_name, d.address_line, d.city, d.state, d.pincode, d.delivery_address,
+    o.marketplace_order_id, o.courier, o.tracking_id,
+    d.estimated_delivery_date, d.payment_due_date, d.payment_status,
+    o.delivery_code_type, d.dispute_status, d.created_at
+  FROM public.deals d
+  LEFT JOIN public.orders o ON o.deal_id = d.id
+  LEFT JOIN public.profiles bp ON bp.id = d.merchant_id
+  LEFT JOIN public.profiles cp ON cp.id = d.customer_id
+  WHERE TRIM(COALESCE(p_query, '')) <> '' AND (
+    o.marketplace_order_id ILIKE q OR o.tracking_id ILIKE q
+    OR d.id::TEXT ILIKE q OR d.product_name ILIKE q
+    OR bp.full_name ILIKE q OR bp.email ILIKE q OR bp.phone ILIKE q
+    OR cp.full_name ILIKE q OR cp.email ILIKE q OR cp.phone ILIKE q
+  )
+  ORDER BY d.created_at DESC LIMIT 50;
+END;
+$$;
+
 -- ---------------------------------------------------------------------------
 -- Browse / detail helpers (privacy: hide delivery address from non-participants)
 -- ---------------------------------------------------------------------------
@@ -1413,7 +2084,10 @@ RETURNS TABLE (
   advance_amount DECIMAL(10,2), remaining_amount DECIMAL(10,2), commission_amount DECIMAL(10,2),
   required_card TEXT, delivery_address TEXT, admin_contact_number TEXT, status TEXT,
   admin_notes TEXT, created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ,
-  reserved_at TIMESTAMPTZ, reserved_until TIMESTAMPTZ, server_now TIMESTAMPTZ
+  reserved_at TIMESTAMPTZ, reserved_until TIMESTAMPTZ, server_now TIMESTAMPTZ,
+  estimated_delivery_date DATE, payment_due_date DATE, payment_status TEXT,
+  payment_reference TEXT, payment_proof_url TEXT, buyer_confirmed_at TIMESTAMPTZ,
+  settled_at TIMESTAMPTZ, dispute_status TEXT, has_delivery_code BOOLEAN
 ) LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
 BEGIN
   IF auth.uid() IS NULL THEN RAISE EXCEPTION 'Sign in to view deal details'; END IF;
@@ -1421,12 +2095,21 @@ BEGIN
   SELECT d.id, d.merchant_id, d.customer_id, d.product_name, d.product_link, d.original_price,
     d.card_offer_price, d.expected_buy_price, d.advance_amount, d.remaining_amount, d.commission_amount,
     d.required_card,
-    CASE WHEN public.is_admin(auth.uid()) OR d.merchant_id = auth.uid() OR d.customer_id = auth.uid()
+    -- Raw address blob only to the buyer + admin. The CARD HOLDER never gets it
+    -- here (a legacy blob may contain the buyer's phone) — they read the sanitized
+    -- get_order_delivery_details instead.
+    CASE WHEN public.is_admin(auth.uid()) OR d.merchant_id = auth.uid()
       THEN d.delivery_address ELSE NULL END,
     d.admin_contact_number, d.status::TEXT,
     CASE WHEN public.is_admin(auth.uid()) OR d.merchant_id = auth.uid() THEN d.admin_notes ELSE NULL END,
     d.created_at, d.updated_at,
-    d.reserved_at, d.reserved_until, now()
+    d.reserved_at, d.reserved_until, now(),
+    d.estimated_delivery_date, d.payment_due_date, d.payment_status,
+    -- Payment proof is the buyer's own; don't reveal it to the card holder.
+    CASE WHEN public.is_admin(auth.uid()) OR d.merchant_id = auth.uid() THEN d.payment_reference ELSE NULL END,
+    CASE WHEN public.is_admin(auth.uid()) OR d.merchant_id = auth.uid() THEN d.payment_proof_url ELSE NULL END,
+    d.buyer_confirmed_at, d.settled_at, d.dispute_status,
+    EXISTS (SELECT 1 FROM public.delivery_codes dc WHERE dc.deal_id = d.id AND dc.cleared_at IS NULL)
   FROM public.deals d
   WHERE d.id = p_deal_id AND (
     public.is_admin(auth.uid()) OR d.merchant_id = auth.uid() OR d.customer_id = auth.uid()
