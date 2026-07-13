@@ -119,7 +119,21 @@ CREATE TABLE IF NOT EXISTS public.deals (
   expected_buy_price DECIMAL(10,2) NOT NULL,
   advance_amount DECIMAL(10,2) NOT NULL,
   remaining_amount DECIMAL(10,2) NOT NULL,
+  -- Cardholder Reward (kept under its legacy column name for compatibility): the
+  -- cash reward the buyer offers the cardholder. UI label = "Cardholder Reward".
   commission_amount DECIMAL(10,2) NOT NULL,
+  -- ---- Business model (new-model deals; NULL service_fee = legacy deal) -------
+  -- Buyer pays  = actual verified purchase price + cardholder reward + service fee
+  -- Cardholder  = actual verified purchase price + cardholder reward
+  -- Platform    = service fee (locked at creation from platform_fee_config)
+  offer_details TEXT,                        -- optional buyer note about the card offer
+  service_fee DECIMAL(10,2),                 -- SERVER-computed at INSERT (trigger); never client-trusted
+  actual_purchase_price DECIMAL(10,2),       -- verified by admin from order proof; NULL until verification
+  -- Reconciliation when the actual price exceeds what the buyer agreed to:
+  -- none = no revision needed | pending_buyer = buyer must approve the higher total
+  -- accepted = buyer approved | declined = buyer refused (admin resolves)
+  price_revision_status TEXT NOT NULL DEFAULT 'none'
+    CHECK (price_revision_status IN ('none','pending_buyer','accepted','declined')),
   required_card TEXT NOT NULL,
   delivery_address TEXT,
   admin_contact_number TEXT,
@@ -281,6 +295,32 @@ CREATE TABLE IF NOT EXISTS public.referral_config (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 INSERT INTO public.referral_config (id) VALUES (true) ON CONFLICT (id) DO NOTHING;
+
+-- OfferBridge service-fee policy (single-row singleton, same shape as
+-- referral_config). fee = clamp(reward × fee_percent%, fee_min, fee_max), locked
+-- onto each deal at creation by the deals_set_pricing trigger. Admin-editable
+-- (RLS) so the policy can change WITHOUT touching payment/settlement logic —
+-- already-created deals keep their locked fee.
+CREATE TABLE IF NOT EXISTS public.platform_fee_config (
+  id BOOLEAN PRIMARY KEY DEFAULT true CHECK (id),
+  fee_percent DECIMAL(5,2) NOT NULL DEFAULT 20 CHECK (fee_percent >= 0 AND fee_percent <= 100),
+  fee_min DECIMAL(10,2) NOT NULL DEFAULT 20 CHECK (fee_min >= 0),
+  fee_max DECIMAL(10,2) NOT NULL DEFAULT 500 CHECK (fee_max >= 0),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT platform_fee_min_le_max CHECK (fee_min <= fee_max)
+);
+INSERT INTO public.platform_fee_config (id) VALUES (true) ON CONFLICT (id) DO NOTHING;
+
+-- Platform revenue ledger: one row per settled deal (UNIQUE deal_id = the
+-- idempotency guard — a duplicate settlement attempt cannot double-record
+-- revenue). Written only by complete_deal (SECURITY DEFINER); admin-only reads.
+CREATE TABLE IF NOT EXISTS public.platform_revenue (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  deal_id UUID NOT NULL UNIQUE REFERENCES public.deals(id) ON DELETE CASCADE,
+  amount DECIMAL(10,2) NOT NULL CHECK (amount >= 0),
+  source TEXT NOT NULL DEFAULT 'service_fee',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 -- App-wide settings the admin can edit from the dashboard (single-row singleton).
 -- support_whatsapp is the public support contact shown on deal cards. It starts
@@ -565,6 +605,22 @@ ALTER TABLE public.referrals ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEF
 ALTER TABLE public.referrals ADD COLUMN IF NOT EXISTS qualified_at TIMESTAMPTZ;
 ALTER TABLE public.referrals ADD COLUMN IF NOT EXISTS reversed_at TIMESTAMPTZ;
 
+-- deals: reconcile the business-model columns onto already-deployed DBs.
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS offer_details TEXT;
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS service_fee DECIMAL(10,2);
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS actual_purchase_price DECIMAL(10,2);
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS price_revision_status TEXT NOT NULL DEFAULT 'none';
+DO $$ BEGIN
+  ALTER TABLE public.deals ADD CONSTRAINT deals_price_revision_status_check
+    CHECK (price_revision_status IN ('none','pending_buyer','accepted','declined'));
+EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER TABLE public.deals ADD CONSTRAINT deals_new_pricing_nonneg CHECK (
+    (service_fee IS NULL OR service_fee >= 0)
+    AND (actual_purchase_price IS NULL OR actual_purchase_price > 0)
+  ) NOT VALID;
+EXCEPTION WHEN duplicate_object OR duplicate_table THEN NULL; END $$;
+
 -- email_outbox: reconcile the delivery-worker columns onto already-deployed DBs
 -- (the CREATE TABLE above has them; these ALTERs upgrade an existing outbox).
 ALTER TABLE public.email_outbox ADD COLUMN IF NOT EXISTS link TEXT;
@@ -618,6 +674,8 @@ ALTER TABLE public.notifications         ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.withdrawal_requests   ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.otp_records           ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.referral_config       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.platform_fee_config   ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.platform_revenue      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.referrals             ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.app_settings          ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.reservation_config     ENABLE ROW LEVEL SECURITY;
@@ -751,9 +809,26 @@ CREATE POLICY "Admins can view all deals" ON public.deals
 -- the buyer + admins via get_deal_for_viewer, the card holder via the sanitized
 -- get_order_delivery_details, admins via admin_order_search. INSERT is unaffected,
 -- so posting a deal still works (CreateDeal does not read the row back).
-REVOKE SELECT (delivery_address, recipient_name, address_line, city, state, pincode,
-               delivery_instructions, payment_reference, payment_proof_url)
-  ON public.deals FROM anon, authenticated;
+-- Column privacy done RIGHT. A bare `REVOKE SELECT (cols)` is a NO-OP here: the
+-- Supabase table-level SELECT grant already covers every column, so a partial
+-- column revoke never takes effect (verified: has_column_privilege stayed true).
+-- The only way to actually hide columns is to REVOKE the table-wide SELECT and
+-- then GRANT SELECT on exactly the safe columns. The excluded set — the buyer's
+-- delivery PII, payment proof, and the platform service_fee — is then genuinely
+-- unreadable by any client; participants get the masked view via the SECURITY
+-- DEFINER RPCs (get_deal_for_viewer / get_order_delivery_details) instead.
+REVOKE SELECT ON public.deals FROM anon, authenticated;
+GRANT SELECT (
+  id, merchant_id, customer_id, product_name, product_link, original_price,
+  card_offer_price, expected_buy_price, advance_amount, remaining_amount,
+  commission_amount, offer_details, actual_purchase_price, price_revision_status,
+  required_card, admin_contact_number, reserved_at, reserved_until,
+  estimated_delivery_date, payment_due_date, payment_status, payment_method,
+  order_proof_status, order_proof_verified_at, order_proof_reason,
+  payment_submitted_at, payment_verified_at, buyer_confirmed_at, settled_at,
+  dispute_status, status, admin_notes, created_at, updated_at
+) ON public.deals TO authenticated;
+-- (anon reads open deals only through list_open_deals, a SECURITY DEFINER RPC.)
 -- SECURITY: a user may only create their OWN deal, only in 'pending' status, and
 -- only once their email is verified (blocks self-approval + unverified posting).
 DROP POLICY IF EXISTS "Users can create deals" ON public.deals;
@@ -869,6 +944,22 @@ DROP POLICY IF EXISTS "Admins manage referral config" ON public.referral_config;
 CREATE POLICY "Admins manage referral config" ON public.referral_config
   FOR ALL USING (public.is_admin(auth.uid()));
 
+-- platform_fee_config: fee policy is readable by any signed-in user (the deal
+-- creation page shows a live "Total you pay" summary); only admins change it.
+-- Buyers can NEVER set the fee on a deal — the deals_set_pricing trigger
+-- recomputes it server-side from this table on every insert.
+DROP POLICY IF EXISTS "Anyone signed in can read fee config" ON public.platform_fee_config;
+CREATE POLICY "Anyone signed in can read fee config" ON public.platform_fee_config
+  FOR SELECT TO authenticated USING (true);
+DROP POLICY IF EXISTS "Admins manage fee config" ON public.platform_fee_config;
+CREATE POLICY "Admins manage fee config" ON public.platform_fee_config
+  FOR ALL USING (public.is_admin(auth.uid()));
+
+-- platform_revenue: admin-only visibility; written only by complete_deal.
+DROP POLICY IF EXISTS "Admins read platform revenue" ON public.platform_revenue;
+CREATE POLICY "Admins read platform revenue" ON public.platform_revenue
+  FOR SELECT USING (public.is_admin(auth.uid()));
+
 -- referrals: a referrer sees the referrals they made; admins see all. All writes
 -- go through SECURITY DEFINER RPCs (apply_referral_code / qualification / admin).
 DROP POLICY IF EXISTS "Referrer or admin can view referrals" ON public.referrals;
@@ -925,12 +1016,14 @@ CREATE POLICY "Admins read email outbox" ON public.email_outbox
 
 -- razorpay_orders: the deal's participants + admins can READ status; only the
 -- edge functions (service role, which bypasses RLS) write. No client write policy.
+-- Buyer + admin ONLY. amount_paise is the buyer's total (→ the service fee); the
+-- cardholder (customer_id) must never read it, so they are deliberately excluded.
 DROP POLICY IF EXISTS "Participants or admin read razorpay orders" ON public.razorpay_orders;
-CREATE POLICY "Participants or admin read razorpay orders" ON public.razorpay_orders
+CREATE POLICY "Buyer or admin read razorpay orders" ON public.razorpay_orders
   FOR SELECT USING (
     public.is_admin(auth.uid())
     OR EXISTS (SELECT 1 FROM public.deals d WHERE d.id = razorpay_orders.deal_id
-               AND (d.merchant_id = auth.uid() OR d.customer_id = auth.uid()))
+               AND d.merchant_id = auth.uid())
   );
 
 -- ---------------------------------------------------------------------------
@@ -1281,9 +1374,13 @@ $$;
 -- Admin reviews the card holder's order proof. Only after 'approve' is the buyer
 -- asked to pay. 'reject'/'correction' require a reason and bounce it back to the
 -- card holder to resubmit.
-CREATE OR REPLACE FUNCTION public.admin_verify_order_proof(p_deal_id UUID, p_action TEXT, p_reason TEXT DEFAULT NULL)
+-- Signature changed (added p_actual_amount) — drop the old 3-arg overload so
+-- PostgREST never sees two candidates.
+DROP FUNCTION IF EXISTS public.admin_verify_order_proof(UUID, TEXT, TEXT);
+CREATE OR REPLACE FUNCTION public.admin_verify_order_proof(
+  p_deal_id UUID, p_action TEXT, p_reason TEXT DEFAULT NULL, p_actual_amount DECIMAL DEFAULT NULL)
 RETURNS public.deals LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
-DECLARE d public.deals; v_due DATE; v_pstatus TEXT;
+DECLARE d public.deals; v_due DATE; v_pstatus TEXT; v_payable DECIMAL;
 BEGIN
   IF NOT public.is_admin(auth.uid()) THEN RAISE EXCEPTION 'Only admins can verify order proof'; END IF;
   IF p_action NOT IN ('approve','reject','correction') THEN RAISE EXCEPTION 'Invalid action'; END IF;
@@ -1295,6 +1392,24 @@ BEGIN
   IF d.order_proof_status = 'verified' THEN RAISE EXCEPTION 'Order proof is already verified'; END IF;
 
   IF p_action = 'approve' THEN
+    -- The payment deadline is EDD − 1; a NULL EDD would null the whole
+    -- notification message (NOT NULL violation → silent rollback). place_deal_order
+    -- mandates EDD, so this only guards a malformed legacy row — with a clear error.
+    IF d.estimated_delivery_date IS NULL THEN
+      RAISE EXCEPTION 'This order has no estimated delivery date; it cannot be approved for payment';
+    END IF;
+    -- New-model deals: the admin must establish the ACTUAL purchase amount from
+    -- the order proof — it becomes the reimbursement base and part of the
+    -- buyer's payable. Legacy deals (no service_fee) keep their old semantics.
+    IF d.service_fee IS NOT NULL THEN
+      IF p_actual_amount IS NULL OR p_actual_amount <= 0 THEN
+        RAISE EXCEPTION 'Enter the actual purchase amount verified from the order proof';
+      END IF;
+      IF p_actual_amount > d.original_price THEN
+        RAISE EXCEPTION 'Actual amount exceeds the original price — reject or request a correction instead';
+      END IF;
+    END IF;
+
     v_due := d.estimated_delivery_date - 1;
     v_pstatus := CASE
       WHEN d.payment_status IN ('submitted','verified','refunded') THEN d.payment_status
@@ -1302,23 +1417,61 @@ BEGIN
       WHEN CURRENT_DATE >= v_due THEN 'due'
       WHEN v_due - CURRENT_DATE <= 2 THEN 'due_soon'
       ELSE 'not_due' END;
+
+    -- Reconciliation: if the verified actual price EXCEEDS what the buyer agreed
+    -- to (the posted price-after-offer), do NOT bill the buyer a surprise —
+    -- ask them to approve the revised total first. A lower/equal actual price
+    -- auto-proceeds (the buyer only benefits).
+    IF d.service_fee IS NOT NULL AND p_actual_amount > d.card_offer_price THEN
+      UPDATE public.deals SET order_proof_status = 'verified', order_proof_verified_at = now(),
+        order_proof_reason = NULL, actual_purchase_price = p_actual_amount,
+        price_revision_status = 'pending_buyer', updated_at = now()
+      WHERE id = p_deal_id RETURNING * INTO d;
+      v_payable := public.deal_buyer_payable(d);
+      PERFORM public.log_order_event(p_deal_id, auth.uid(), 'order_proof_verified',
+        'Actual price ₹' || p_actual_amount || ' exceeds agreed ₹' || d.card_offer_price || ' — buyer approval requested',
+        -- No buyer_payable/fee in metadata: order_events is readable by the
+        -- cardholder, who must never learn the platform's cut.
+        jsonb_build_object('actual_purchase_price', p_actual_amount));
+      PERFORM public.notify_and_email(d.merchant_id, 'Price changed — review your order',
+        'The verified purchase price for "' || d.product_name || '" is ₹' || p_actual_amount
+          || ' (you agreed to ₹' || d.card_offer_price || '). New total: ₹' || v_payable
+          || '. Open the order to accept or decline the revised amount.',
+        'warning', '/deals/' || p_deal_id, 'price_revision:' || p_deal_id,
+        'Price revision needs your approval — OfferBridge',
+        'The verified purchase price for "' || d.product_name || '" is ₹' || p_actual_amount
+          || ', higher than the ₹' || d.card_offer_price || ' you agreed to. Your revised total is ₹' || v_payable
+          || '. Please open the order in OfferBridge and accept or decline the revised amount. You will not be charged unless you accept.');
+      RETURN d;
+    END IF;
+
     UPDATE public.deals SET order_proof_status = 'verified', order_proof_verified_at = now(),
-      order_proof_reason = NULL, payment_status = v_pstatus, updated_at = now()
+      order_proof_reason = NULL, payment_status = v_pstatus,
+      actual_purchase_price = CASE WHEN d.service_fee IS NOT NULL THEN p_actual_amount ELSE actual_purchase_price END,
+      updated_at = now()
     WHERE id = p_deal_id RETURNING * INTO d;
-    PERFORM public.log_order_event(p_deal_id, auth.uid(), 'order_proof_verified', NULL, NULL);
+    v_payable := public.deal_buyer_payable(d);
+    PERFORM public.log_order_event(p_deal_id, auth.uid(), 'order_proof_verified',
+      CASE WHEN d.service_fee IS NOT NULL THEN 'Actual verified amount ₹' || d.actual_purchase_price ELSE NULL END,
+      CASE WHEN d.service_fee IS NOT NULL THEN jsonb_build_object('actual_purchase_price', d.actual_purchase_price) ELSE NULL END);
     -- NOW ask the buyer to pay (in-app + email), with exact amount + deadline.
     PERFORM public.notify_and_email(d.merchant_id, 'Payment requested',
-      'Your order for "' || d.product_name || '" is verified. Pay ₹' || d.expected_buy_price
+      'Your order for "' || d.product_name || '" is verified. Pay ₹' || v_payable
         || ' by ' || to_char(v_due, 'DD Mon YYYY') || ' (one day before delivery). Open the order to pay now.',
       'info', '/deals/' || p_deal_id, 'pay_request:' || p_deal_id,
       'Payment requested for your OfferBridge order',
-      'Your order for "' || d.product_name || '" has been verified. Please pay ₹' || d.expected_buy_price
+      'Your order for "' || d.product_name || '" has been verified. Please pay ₹' || v_payable
         || ' by ' || to_char(v_due, 'DD Mon YYYY') || '. Open your order in OfferBridge to pay now.');
   ELSE
     IF NULLIF(TRIM(COALESCE(p_reason, '')), '') IS NULL THEN
       RAISE EXCEPTION 'A reason is required to reject or request a correction';
     END IF;
-    UPDATE public.deals SET order_proof_status = p_action, order_proof_reason = TRIM(p_reason), updated_at = now()
+    -- Map the action to the stored status: 'reject' → 'rejected' (the CHECK and
+    -- every consumer — place_deal_order, FulfilmentPanel — expect 'rejected', not
+    -- 'reject'). 'correction' stays as-is.
+    UPDATE public.deals
+      SET order_proof_status = CASE WHEN p_action = 'reject' THEN 'rejected' ELSE 'correction' END,
+          order_proof_reason = TRIM(p_reason), updated_at = now()
     WHERE id = p_deal_id RETURNING * INTO d;
     PERFORM public.log_order_event(p_deal_id, auth.uid(), 'order_proof_' || p_action, TRIM(p_reason), NULL);
     -- Bounce back to the CARD HOLDER (not the buyer) to resubmit. Buyer not billed.
@@ -1329,6 +1482,148 @@ BEGIN
       'Action needed on your OfferBridge order proof',
       'Your order proof for "' || d.product_name || '" needs attention: ' || TRIM(p_reason) || ' Please resubmit it.');
   END IF;
+  RETURN d;
+END;
+$$;
+
+-- Buyer's response to a price revision (actual verified price > agreed price).
+-- Accept → the payment request goes out with the revised total. Decline → the
+-- deal is flagged for admin resolution; the buyer is never auto-charged.
+CREATE OR REPLACE FUNCTION public.buyer_respond_price_revision(p_deal_id UUID, p_accept BOOLEAN)
+RETURNS public.deals LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE d public.deals; v_due DATE; v_pstatus TEXT; v_payable DECIMAL;
+BEGIN
+  IF auth.uid() IS NULL THEN RAISE EXCEPTION 'Sign in first'; END IF;
+  SELECT * INTO d FROM public.deals WHERE id = p_deal_id FOR UPDATE;
+  IF d IS NULL THEN RAISE EXCEPTION 'Deal not found'; END IF;
+  IF d.merchant_id IS DISTINCT FROM auth.uid() THEN
+    RAISE EXCEPTION 'Only the buyer can respond to a price revision';
+  END IF;
+  IF d.price_revision_status <> 'pending_buyer' THEN
+    RAISE EXCEPTION 'No price revision is awaiting your approval';
+  END IF;
+
+  IF p_accept THEN
+    v_due := d.estimated_delivery_date - 1;
+    v_pstatus := CASE
+      WHEN d.payment_status IN ('submitted','verified','refunded') THEN d.payment_status
+      WHEN CURRENT_DATE > v_due THEN 'overdue'
+      WHEN CURRENT_DATE >= v_due THEN 'due'
+      WHEN v_due - CURRENT_DATE <= 2 THEN 'due_soon'
+      ELSE 'not_due' END;
+    UPDATE public.deals SET price_revision_status = 'accepted', payment_status = v_pstatus, updated_at = now()
+    WHERE id = p_deal_id RETURNING * INTO d;
+    v_payable := public.deal_buyer_payable(d);
+    -- Detail/metadata must not reveal buyer_payable (→ the fee) to the cardholder.
+    PERFORM public.log_order_event(p_deal_id, auth.uid(), 'price_revision_accepted',
+      'Buyer accepted the revised price',
+      jsonb_build_object('actual_purchase_price', d.actual_purchase_price));
+    PERFORM public.notify_and_email(d.merchant_id, 'Payment requested',
+      'Revised total accepted. Pay ₹' || v_payable || ' by ' || to_char(v_due, 'DD Mon YYYY')
+        || ' for "' || d.product_name || '". Open the order to pay now.',
+      'info', '/deals/' || p_deal_id, 'pay_request:' || p_deal_id,
+      'Payment requested for your OfferBridge order',
+      'You accepted the revised total for "' || d.product_name || '". Please pay ₹' || v_payable
+        || ' by ' || to_char(v_due, 'DD Mon YYYY') || '. Open your order in OfferBridge to pay now.');
+    PERFORM public.notify_and_email(d.customer_id, 'Buyer accepted the revised price',
+      'The buyer accepted the revised price for "' || d.product_name || '". Awaiting their payment.',
+      'success', '/deals/' || p_deal_id, 'price_rev_ok:' || p_deal_id, NULL, NULL);
+  ELSE
+    UPDATE public.deals SET price_revision_status = 'declined', updated_at = now()
+    WHERE id = p_deal_id RETURNING * INTO d;
+    PERFORM public.log_order_event(p_deal_id, auth.uid(), 'price_revision_declined',
+      'Buyer declined revised total', jsonb_build_object('actual_purchase_price', d.actual_purchase_price));
+    -- Flag every admin: manual resolution (cancel / re-verify with corrected amount).
+    PERFORM public.notify_and_email(ur.user_id, 'Price revision declined',
+      'The buyer declined the revised price on "' || d.product_name || '". Resolve the deal (cancel or re-verify).',
+      'warning', '/admin', NULL, NULL, NULL)
+    FROM public.user_roles ur WHERE ur.role = 'admin';
+    PERFORM public.notify_and_email(d.customer_id, 'Buyer declined the revised price',
+      'The buyer declined the revised price for "' || d.product_name || '". An admin will contact you to resolve it.',
+      'warning', '/deals/' || p_deal_id, 'price_rev_declined_ch:' || p_deal_id, NULL, NULL);
+  END IF;
+  RETURN d;
+END;
+$$;
+
+-- Admin resolution for a DECLINED price revision (otherwise the deal is stuck:
+-- it can't be re-verified — order proof is already 'verified' — nor cancelled by
+-- cancel_deal, which only handles pending/approved). Two exits:
+--   'reverify' + p_new_actual_amount → correct the actual amount and continue
+--       (<= agreed price → payment request goes out; > agreed → back to the buyer)
+--   'cancel' → terminate the in_progress deal (admin handles any offline refund)
+CREATE OR REPLACE FUNCTION public.admin_resolve_price_revision(
+  p_deal_id UUID, p_action TEXT, p_new_actual_amount DECIMAL DEFAULT NULL, p_notes TEXT DEFAULT NULL)
+RETURNS public.deals LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE d public.deals; v_due DATE; v_pstatus TEXT; v_payable DECIMAL;
+BEGIN
+  IF NOT public.is_admin(auth.uid()) THEN RAISE EXCEPTION 'Only admins can resolve a price revision'; END IF;
+  IF p_action NOT IN ('reverify','cancel') THEN RAISE EXCEPTION 'Invalid action'; END IF;
+  SELECT * INTO d FROM public.deals WHERE id = p_deal_id FOR UPDATE;
+  IF d IS NULL THEN RAISE EXCEPTION 'Deal not found'; END IF;
+  IF d.price_revision_status <> 'declined' THEN
+    RAISE EXCEPTION 'This deal has no declined price revision to resolve';
+  END IF;
+
+  IF p_action = 'cancel' THEN
+    UPDATE public.deals SET status = 'cancelled', price_revision_status = 'none',
+      admin_notes = COALESCE(p_notes, 'Cancelled after declined price revision.'), updated_at = now()
+    WHERE id = p_deal_id RETURNING * INTO d;
+    PERFORM public.log_order_event(p_deal_id, auth.uid(), 'price_revision_cancelled', p_notes, NULL);
+    PERFORM public.notify_and_email(d.merchant_id, 'Order cancelled',
+      'Your order for "' || d.product_name || '" was cancelled after the price revision. Any amount paid will be refunded.',
+      'warning', '/deals/' || p_deal_id, 'deal_cancelled:' || p_deal_id, NULL, NULL);
+    PERFORM public.notify_and_email(d.customer_id, 'Order cancelled',
+      'The order for "' || d.product_name || '" was cancelled by an admin after the price revision.',
+      'warning', '/deals/' || p_deal_id, 'deal_cancelled_ch:' || p_deal_id, NULL, NULL);
+    RETURN d;
+  END IF;
+
+  -- reverify: a corrected actual amount is required.
+  IF p_new_actual_amount IS NULL OR p_new_actual_amount <= 0 THEN
+    RAISE EXCEPTION 'Enter the corrected actual purchase amount';
+  END IF;
+  IF p_new_actual_amount > d.original_price THEN
+    RAISE EXCEPTION 'Actual amount exceeds the original price';
+  END IF;
+
+  v_due := d.estimated_delivery_date - 1;
+  v_pstatus := CASE
+    WHEN d.payment_status IN ('submitted','verified','refunded') THEN d.payment_status
+    WHEN CURRENT_DATE > v_due THEN 'overdue'
+    WHEN CURRENT_DATE >= v_due THEN 'due'
+    WHEN v_due - CURRENT_DATE <= 2 THEN 'due_soon'
+    ELSE 'not_due' END;
+
+  IF p_new_actual_amount > d.card_offer_price THEN
+    -- Still above the agreed price → back to the buyer for approval.
+    UPDATE public.deals SET actual_purchase_price = p_new_actual_amount,
+      price_revision_status = 'pending_buyer', updated_at = now()
+    WHERE id = p_deal_id RETURNING * INTO d;
+    v_payable := public.deal_buyer_payable(d);
+    PERFORM public.log_order_event(p_deal_id, auth.uid(), 'price_revision_reverified',
+      'Corrected actual ₹' || p_new_actual_amount || ' still above agreed — buyer approval requested', NULL);
+    PERFORM public.notify_and_email(d.merchant_id, 'Price updated — review your order',
+      'The purchase price for "' || d.product_name || '" was corrected to ₹' || p_new_actual_amount
+        || '. New total: ₹' || v_payable || '. Open the order to accept or decline.',
+      'warning', '/deals/' || p_deal_id, 'price_revision2:' || p_deal_id, NULL, NULL);
+    RETURN d;
+  END IF;
+
+  -- Corrected actual is within the agreed price → proceed straight to payment.
+  UPDATE public.deals SET actual_purchase_price = p_new_actual_amount,
+    price_revision_status = 'accepted', payment_status = v_pstatus, updated_at = now()
+  WHERE id = p_deal_id RETURNING * INTO d;
+  v_payable := public.deal_buyer_payable(d);
+  PERFORM public.log_order_event(p_deal_id, auth.uid(), 'price_revision_reverified',
+    'Corrected actual ₹' || p_new_actual_amount || ' — payment requested', NULL);
+  PERFORM public.notify_and_email(d.merchant_id, 'Payment requested',
+    'The price for "' || d.product_name || '" was corrected. Pay ₹' || v_payable
+      || ' by ' || to_char(v_due, 'DD Mon YYYY') || '. Open the order to pay now.',
+    'info', '/deals/' || p_deal_id, 'pay_request:' || p_deal_id,
+    'Payment requested for your OfferBridge order',
+    'The price for "' || d.product_name || '" was corrected. Please pay ₹' || v_payable
+      || ' by ' || to_char(v_due, 'DD Mon YYYY') || '.');
   RETURN d;
 END;
 $$;
@@ -1442,7 +1737,9 @@ BEGIN
     RAISE EXCEPTION 'Deal not found or not in progress';
   END IF;
 
-  payout_amount := deal_record.card_offer_price + deal_record.commission_amount;
+  -- Settlement authority: actual verified purchase price + cardholder reward
+  -- (legacy deals fall back to card_offer_price + commission inside the helper).
+  payout_amount := public.deal_cardholder_payout(deal_record);
 
   INSERT INTO public.wallets (user_id, balance, locked_amount)
   VALUES (deal_record.customer_id, payout_amount, 0)
@@ -1450,19 +1747,28 @@ BEGIN
   SET balance = public.wallets.balance + EXCLUDED.balance, updated_at = now();
 
   INSERT INTO public.payments (from_user_id, to_user_id, deal_id, amount, payment_type, status, description)
-  VALUES (deal_record.merchant_id, deal_record.customer_id, p_deal_id, deal_record.card_offer_price,
+  VALUES (deal_record.merchant_id, deal_record.customer_id, p_deal_id,
+    COALESCE(deal_record.actual_purchase_price, deal_record.card_offer_price),
     'reimbursement', 'released', 'Reimbursement for order placed on ' || deal_record.product_name);
 
   INSERT INTO public.payments (from_user_id, to_user_id, deal_id, amount, payment_type, status, description)
   VALUES (deal_record.merchant_id, deal_record.customer_id, p_deal_id, deal_record.commission_amount,
-    'commission', 'released', 'Commission for deal "' || deal_record.product_name || '"');
+    'commission', 'released', 'Cardholder reward for deal "' || deal_record.product_name || '"');
+
+  -- Platform revenue: record the locked service fee exactly once (UNIQUE deal_id
+  -- makes a duplicate settlement attempt a no-op). Legacy deals have no fee row.
+  IF deal_record.service_fee IS NOT NULL AND deal_record.service_fee > 0 THEN
+    INSERT INTO public.platform_revenue (deal_id, amount, source)
+    VALUES (p_deal_id, deal_record.service_fee, 'service_fee')
+    ON CONFLICT (deal_id) DO NOTHING;
+  END IF;
 
   -- Dual-channel (in-app + email), idempotent per deal via dedup_key.
   PERFORM public.notify_and_email(deal_record.customer_id, 'Payment Credited',
-    '₹' || payout_amount || ' (reimbursement + commission) credited to your wallet for "' || deal_record.product_name || '".',
+    '₹' || payout_amount || ' (reimbursement + reward) credited to your wallet for "' || deal_record.product_name || '".',
     'success', '/wallet', 'settle_credit:' || p_deal_id,
     'Your OfferBridge wallet was credited',
-    '₹' || payout_amount || ' (reimbursement + commission) has been credited to your OfferBridge wallet for "' || deal_record.product_name || '". You can withdraw it from your wallet once KYC is approved.');
+    '₹' || payout_amount || ' (reimbursement + reward) has been credited to your OfferBridge wallet for "' || deal_record.product_name || '". You can withdraw it from your wallet once KYC is approved.');
 
   PERFORM public.notify_and_email(deal_record.merchant_id, 'Deal Completed',
     'Your deal "' || deal_record.product_name || '" is complete.', 'success', '/deals/' || p_deal_id,
@@ -1473,8 +1779,10 @@ BEGIN
   -- Refer & Earn: a referred user qualifies on their first completed deal in
   -- EITHER role, so evaluate both the card holder and the shopper. Each user has
   -- at most one pending referral (UNIQUE referred_id), so no double reward.
-  PERFORM public.maybe_qualify_referral(deal_record.customer_id, p_deal_id, deal_record.expected_buy_price);
-  PERFORM public.maybe_qualify_referral(deal_record.merchant_id, p_deal_id, deal_record.expected_buy_price);
+  -- Referral 'deal value' = what the buyer actually pays (the helper preserves
+  -- the legacy expected_buy_price semantics for old deals).
+  PERFORM public.maybe_qualify_referral(deal_record.customer_id, p_deal_id, public.deal_buyer_payable(deal_record));
+  PERFORM public.maybe_qualify_referral(deal_record.merchant_id, p_deal_id, public.deal_buyer_payable(deal_record));
 END;
 $$;
 
@@ -1706,6 +2014,129 @@ BEGIN
   LIMIT 1;
 END;
 $$;
+
+-- ===========================================================================
+-- Business-model pricing authority (server-side; the frontend NEVER computes
+-- money that matters). One formula, defined once, used by Razorpay, quotes,
+-- reminders and settlement:
+--   buyer pays        = actual verified price + cardholder reward + service fee
+--   cardholder payout = actual verified price + cardholder reward
+--   platform revenue  = service fee
+-- Legacy deals (service_fee IS NULL) keep their original semantics:
+--   buyer pays expected_buy_price; payout = card_offer_price + commission_amount.
+-- ===========================================================================
+
+-- fee = clamp(reward × percent%, min, max), rounded to whole rupees so the
+-- paise conversion (ROUND(x*100)) is always exact.
+CREATE OR REPLACE FUNCTION public.compute_service_fee(p_reward DECIMAL)
+RETURNS DECIMAL LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE cfg public.platform_fee_config;
+BEGIN
+  SELECT * INTO cfg FROM public.platform_fee_config WHERE id = true;
+  IF cfg IS NULL THEN RETURN 20; END IF;  -- safe default = the seeded policy minimum
+  RETURN ROUND(LEAST(GREATEST(COALESCE(p_reward, 0) * cfg.fee_percent / 100.0, cfg.fee_min), cfg.fee_max), 0);
+END;
+$$;
+
+-- Audit trail: every fee-policy change is logged (who, old → new) so monetary
+-- policy adjustments are traceable.
+CREATE OR REPLACE FUNCTION public.log_fee_policy_change()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  NEW.updated_at := now();
+  INSERT INTO public.order_events (deal_id, actor_id, event_type, detail, metadata)
+  VALUES (NULL, auth.uid(), 'fee_policy_updated',
+    'Service-fee policy changed',
+    jsonb_build_object('old', jsonb_build_object('percent', OLD.fee_percent, 'min', OLD.fee_min, 'max', OLD.fee_max),
+                       'new', jsonb_build_object('percent', NEW.fee_percent, 'min', NEW.fee_min, 'max', NEW.fee_max)));
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS platform_fee_config_audit ON public.platform_fee_config;
+CREATE TRIGGER platform_fee_config_audit BEFORE UPDATE ON public.platform_fee_config
+  FOR EACH ROW EXECUTE FUNCTION public.log_fee_policy_change();
+
+-- THE single buyer-payable authority. Every Razorpay amount, payment request,
+-- reminder and manual-payment quote flows through this function.
+CREATE OR REPLACE FUNCTION public.deal_buyer_payable(d public.deals)
+RETURNS DECIMAL LANGUAGE sql STABLE AS $$
+  SELECT CASE
+    WHEN d.service_fee IS NULL THEN d.expected_buy_price   -- legacy deal
+    ELSE COALESCE(d.actual_purchase_price, d.card_offer_price) + d.commission_amount + d.service_fee
+  END;
+$$;
+
+-- THE single settlement authority (what the cardholder's wallet is credited).
+CREATE OR REPLACE FUNCTION public.deal_cardholder_payout(d public.deals)
+RETURNS DECIMAL LANGUAGE sql STABLE AS $$
+  SELECT CASE
+    WHEN d.service_fee IS NULL THEN d.card_offer_price + d.commission_amount  -- legacy deal
+    ELSE COALESCE(d.actual_purchase_price, d.card_offer_price) + d.commission_amount
+  END;
+$$;
+
+-- Server-side pricing enforcement at deal creation. Deals are inserted directly
+-- by the buyer's client (RLS-guarded), so this BEFORE INSERT trigger is the
+-- authority: it ALWAYS overwrites service_fee from the central policy (a forged
+-- client value is discarded), normalizes the derived columns, and validates the
+-- basics. This is what makes the fee tamper-proof without moving inserts to an RPC.
+CREATE OR REPLACE FUNCTION public.deals_set_pricing()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF NEW.original_price IS NULL OR NEW.original_price <= 0 THEN
+    RAISE EXCEPTION 'Original price must be greater than zero';
+  END IF;
+  IF NEW.card_offer_price IS NULL OR NEW.card_offer_price <= 0 THEN
+    RAISE EXCEPTION 'Price after card offer must be greater than zero';
+  END IF;
+  IF NEW.card_offer_price > NEW.original_price THEN
+    RAISE EXCEPTION 'Price after card offer cannot exceed the original price';
+  END IF;
+  IF COALESCE(NEW.commission_amount, 0) < 0 THEN
+    RAISE EXCEPTION 'Cardholder reward cannot be negative';
+  END IF;
+
+  -- Authoritative fee — whatever the client sent is ignored.
+  NEW.service_fee := public.compute_service_fee(NEW.commission_amount);
+  -- New-model deals: expected_buy_price now records the expected cardholder
+  -- spend (= price after card offer). Kept NOT NULL for legacy compatibility.
+  NEW.expected_buy_price := COALESCE(NULLIF(NEW.expected_buy_price, 0), NEW.card_offer_price);
+  NEW.advance_amount := COALESCE(NULLIF(NEW.advance_amount, 0), NEW.card_offer_price);
+  NEW.remaining_amount := COALESCE(NEW.remaining_amount, 0);
+
+  -- CRITICAL: force EVERY server-owned lifecycle column to its default. Deals are
+  -- inserted directly by the buyer's client (RLS only pins merchant_id/status/
+  -- is_verified), and Postgres column-level INSERT restrictions are a no-op under
+  -- Supabase's table-level grant — so WITHOUT this a buyer could insert
+  -- payment_status='verified' (or buyer_confirmed_at, order_proof_status=...) and
+  -- take delivery + trigger settlement WITHOUT EVER PAYING. This trigger is the
+  -- authority: no forged lifecycle value can survive a deal insert.
+  NEW.status := 'pending';
+  NEW.customer_id := NULL;
+  NEW.reserved_at := NULL;
+  NEW.reserved_until := NULL;
+  NEW.actual_purchase_price := NULL;
+  NEW.price_revision_status := 'none';
+  NEW.payment_status := 'not_due';
+  NEW.payment_reference := NULL;
+  NEW.payment_proof_url := NULL;
+  NEW.payment_method := NULL;
+  NEW.payment_submitted_at := NULL;
+  NEW.payment_verified_at := NULL;
+  NEW.order_proof_status := 'pending';
+  NEW.order_proof_verified_at := NULL;
+  NEW.order_proof_reason := NULL;
+  NEW.estimated_delivery_date := NULL;
+  NEW.payment_due_date := NULL;
+  NEW.buyer_confirmed_at := NULL;
+  NEW.settled_at := NULL;
+  NEW.dispute_status := NULL;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS deals_set_pricing ON public.deals;
+CREATE TRIGGER deals_set_pricing BEFORE INSERT ON public.deals
+  FOR EACH ROW EXECUTE FUNCTION public.deals_set_pricing();
 
 -- ===========================================================================
 -- Order fulfilment lifecycle: proof → shipping → payment → delivery code →
@@ -1966,6 +2397,9 @@ BEGIN
   UPDATE public.deals SET
     estimated_delivery_date = p_estimated_delivery_date, payment_due_date = v_due,
     payment_status = CASE
+      -- Don't advance the payment clock while a price revision is unresolved —
+      -- the buyer can't pay yet, so they must not be marked due/overdue.
+      WHEN price_revision_status IN ('pending_buyer','declined') THEN payment_status
       WHEN payment_status IN ('submitted','verified','refunded','disputed') THEN payment_status
       WHEN CURRENT_DATE > v_due THEN 'overdue'
       WHEN CURRENT_DATE >= v_due THEN 'due'
@@ -1979,16 +2413,22 @@ BEGIN
       || CASE WHEN date_changed THEN '; est. delivery now ' || to_char(p_estimated_delivery_date, 'DD Mon YYYY') ELSE '' END,
     jsonb_build_object('courier', TRIM(p_courier), 'tracking_id', TRIM(p_tracking_id), 'estimated_delivery', p_estimated_delivery_date));
 
+  -- Only quote a payment demand if the buyer can actually pay (no unresolved
+  -- price revision). Otherwise send the shipping update without a "pay ₹X" line.
   PERFORM public.notify_and_email(d.merchant_id, 'Order shipped',
     'Your order for "' || d.product_name || '" shipped via ' || TRIM(p_courier) || '. Tracking ' || TRIM(p_tracking_id)
-      || '. Estimated delivery ' || to_char(p_estimated_delivery_date, 'DD Mon YYYY') || '; payment due ' || to_char(v_due, 'DD Mon YYYY') || '.',
+      || '. Estimated delivery ' || to_char(p_estimated_delivery_date, 'DD Mon YYYY')
+      || CASE WHEN d.price_revision_status IN ('none','accepted') THEN '; payment due ' || to_char(v_due, 'DD Mon YYYY') ELSE '' END || '.',
     'info', '/deals/' || p_deal_id,
     'shipped:' || p_deal_id || ':' || TRIM(p_tracking_id),
     'Your OfferBridge order has shipped',
     'Your order for "' || d.product_name || '" has shipped via ' || TRIM(p_courier) || ' (tracking ' || TRIM(p_tracking_id)
-      || '). Estimated delivery ' || to_char(p_estimated_delivery_date, 'DD Mon YYYY') || '. Payment of ₹' || d.expected_buy_price || ' is due by ' || to_char(v_due, 'DD Mon YYYY') || '.');
+      || '). Estimated delivery ' || to_char(p_estimated_delivery_date, 'DD Mon YYYY') || '.'
+      || CASE WHEN d.price_revision_status IN ('none','accepted')
+              THEN ' Payment of ₹' || public.deal_buyer_payable(d) || ' is due by ' || to_char(v_due, 'DD Mon YYYY') || '.'
+              ELSE ' We''ll request payment once the price is confirmed.' END);
 
-  IF date_changed THEN
+  IF date_changed AND d.price_revision_status IN ('none','accepted') THEN
     PERFORM public.notify_and_email(d.merchant_id, 'Delivery date updated',
       'The estimated delivery for "' || d.product_name || '" changed to ' || to_char(p_estimated_delivery_date, 'DD Mon YYYY')
         || '. Payment is now due by ' || to_char(v_due, 'DD Mon YYYY') || '.',
@@ -1996,7 +2436,7 @@ BEGIN
       'edd_changed:' || p_deal_id || ':' || p_estimated_delivery_date,
       'Delivery date updated for your OfferBridge order',
       'The estimated delivery date for "' || d.product_name || '" is now ' || to_char(p_estimated_delivery_date, 'DD Mon YYYY')
-        || '. Your payment of ₹' || d.expected_buy_price || ' is due by ' || to_char(v_due, 'DD Mon YYYY') || '.');
+        || '. Your payment of ₹' || public.deal_buyer_payable(d) || ' is due by ' || to_char(v_due, 'DD Mon YYYY') || '.');
   END IF;
 
   RETURN ord;
@@ -2021,6 +2461,12 @@ BEGIN
   IF d.order_proof_status <> 'verified' THEN
     RAISE EXCEPTION 'Payment opens only after an admin verifies the order proof';
   END IF;
+  IF d.price_revision_status = 'pending_buyer' THEN
+    RAISE EXCEPTION 'Please accept or decline the revised price before paying';
+  END IF;
+  IF d.price_revision_status = 'declined' THEN
+    RAISE EXCEPTION 'This order is awaiting admin resolution of the declined price revision';
+  END IF;
   IF d.payment_status = 'verified' THEN RAISE EXCEPTION 'Payment is already verified'; END IF;
   IF NULLIF(TRIM(COALESCE(p_reference, '')), '') IS NULL AND NULLIF(TRIM(COALESCE(p_proof_url, '')), '') IS NULL THEN
     RAISE EXCEPTION 'Add a payment reference or upload a payment screenshot';
@@ -2035,7 +2481,7 @@ BEGIN
 
   -- Notify all admins so someone verifies it.
   PERFORM public.notify_and_email(ur.user_id, 'Payment awaiting verification',
-    'Buyer submitted payment for "' || d.product_name || '" (₹' || d.expected_buy_price || '). Please verify.',
+    'Buyer submitted payment for "' || d.product_name || '" (₹' || public.deal_buyer_payable(d) || '). Please verify.',
     'info', '/admin', NULL, NULL, NULL)
   FROM public.user_roles ur WHERE ur.role = 'admin';
 
@@ -2055,8 +2501,17 @@ BEGIN
   IF d.order_proof_status <> 'verified' THEN
     RAISE EXCEPTION 'Verify the order proof before verifying payment';
   END IF;
+  -- Same reconciliation gate as every other payment path: never verify a payment
+  -- while the buyer hasn't accepted a revised total (or declined it).
+  IF d.price_revision_status IN ('pending_buyer','declined') THEN
+    RAISE EXCEPTION 'Resolve the price revision before verifying payment';
+  END IF;
   IF p_approve THEN
     IF d.payment_status = 'verified' THEN RETURN d; END IF;  -- idempotent
+    -- Only verify against a genuine buyer submission (not out of thin air).
+    IF d.payment_status <> 'submitted' THEN
+      RAISE EXCEPTION 'No payment has been submitted for verification';
+    END IF;
     UPDATE public.deals SET payment_status = 'verified', payment_method = 'manual', payment_verified_at = now(),
       admin_notes = COALESCE(p_notes, admin_notes), updated_at = now()
     WHERE id = p_deal_id RETURNING * INTO d;
@@ -2090,6 +2545,22 @@ $$;
 -- ---------------------------------------------------------------------------
 -- Record a freshly-created Razorpay order for a deal (called after the edge
 -- function created it on Razorpay). Validates the amount + gate before storing.
+-- The edge function's single source of the charge amount: it NEVER computes
+-- money in TypeScript. Same formula gateway_record/confirm re-validate.
+CREATE OR REPLACE FUNCTION public.get_deal_payment_quote(p_deal_id UUID)
+RETURNS TABLE (amount_paise BIGINT, payable DECIMAL, currency TEXT, product_name TEXT, buyer_id UUID)
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE d public.deals;
+BEGIN
+  SELECT * INTO d FROM public.deals WHERE id = p_deal_id;
+  IF d IS NULL THEN RAISE EXCEPTION 'Deal not found'; END IF;
+  RETURN QUERY SELECT ROUND(public.deal_buyer_payable(d) * 100)::BIGINT,
+    public.deal_buyer_payable(d), 'INR'::TEXT, d.product_name, d.merchant_id;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.get_deal_payment_quote(UUID) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.get_deal_payment_quote(UUID) TO service_role;
+
 CREATE OR REPLACE FUNCTION public.gateway_record_razorpay_order(
   p_deal_id UUID, p_razorpay_order_id TEXT, p_amount_paise BIGINT, p_currency TEXT, p_created_by UUID)
 RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
@@ -2098,9 +2569,23 @@ BEGIN
   SELECT * INTO d FROM public.deals WHERE id = p_deal_id;
   IF d IS NULL THEN RAISE EXCEPTION 'Deal not found'; END IF;
   IF d.order_proof_status <> 'verified' THEN RAISE EXCEPTION 'Order proof not verified'; END IF;
+  IF d.price_revision_status IN ('pending_buyer','declined') THEN
+    RAISE EXCEPTION 'Payment is blocked until the price revision is resolved';
+  END IF;
   IF d.payment_status = 'verified' THEN RAISE EXCEPTION 'Payment already verified'; END IF;
   IF p_created_by IS DISTINCT FROM d.merchant_id THEN RAISE EXCEPTION 'Only the buyer can pay for this order'; END IF;
-  expected := ROUND(d.expected_buy_price * 100)::BIGINT;
+  -- One live order per deal: if a paid order already exists, refuse (defends
+  -- against a post-payment second charge). Any earlier 'created' order for this
+  -- deal is marked failed so only the newest is confirmable — preventing two
+  -- open orders from both being captured into a double real-money charge.
+  IF EXISTS (SELECT 1 FROM public.razorpay_orders WHERE deal_id = p_deal_id AND status = 'paid') THEN
+    RAISE EXCEPTION 'This order is already paid';
+  END IF;
+  UPDATE public.razorpay_orders SET status = 'failed', failure_reason = 'superseded by a newer order', updated_at = now()
+  WHERE deal_id = p_deal_id AND status = 'created';
+  -- Single pricing authority (actual verified price + reward + fee; legacy falls
+  -- back to expected_buy_price inside the helper).
+  expected := ROUND(public.deal_buyer_payable(d) * 100)::BIGINT;
   IF p_amount_paise <> expected THEN RAISE EXCEPTION 'Amount mismatch (expected % paise)', expected; END IF;
   IF COALESCE(p_currency, 'INR') <> 'INR' THEN RAISE EXCEPTION 'Only INR is supported'; END IF;
 
@@ -2129,11 +2614,33 @@ BEGIN
   -- Idempotent: a second callback for the same order is a no-op.
   IF ro.status = 'paid' THEN RETURN 'already_paid'; END IF;
 
-  -- Guard amount + currency against the STORED (server-set) values and re-derive
-  -- the expected amount from the deal (defence against cross-deal reuse).
   SELECT * INTO d FROM public.deals WHERE id = ro.deal_id FOR UPDATE;
   IF d IS NULL THEN RAISE EXCEPTION 'Deal not found for order'; END IF;
-  expected := ROUND(d.expected_buy_price * 100)::BIGINT;
+
+  -- DUPLICATE real-money capture: this order was superseded ('failed') by a newer
+  -- one, OR the deal is already paid by a DIFFERENT payment. Never double-verify or
+  -- double-credit — record the capture visibly (money DID move) and alert admins to
+  -- refund it. This turns a silent double charge into an auditable one.
+  IF ro.status = 'failed'
+     OR (d.payment_status = 'verified' AND d.payment_reference IS DISTINCT FROM p_razorpay_payment_id) THEN
+    UPDATE public.razorpay_orders
+      SET status = 'paid', razorpay_payment_id = p_razorpay_payment_id, verified_at = now(),
+          failure_reason = 'DUPLICATE capture — deal already paid; refund required', updated_at = now()
+    WHERE razorpay_order_id = p_razorpay_order_id;
+    PERFORM public.log_order_event(ro.deal_id, d.merchant_id, 'razorpay_duplicate_capture',
+      'Duplicate Razorpay capture — refund required',
+      jsonb_build_object('razorpay_order_id', p_razorpay_order_id, 'razorpay_payment_id', p_razorpay_payment_id,
+        'amount_paise', p_amount_paise));
+    PERFORM public.notify_and_email(ur.user_id, 'Duplicate payment — refund needed',
+      'A duplicate Razorpay payment was captured for "' || d.product_name || '". Refund the extra charge.',
+      'warning', '/admin', 'dup_pay:' || p_razorpay_payment_id, NULL, NULL)
+    FROM public.user_roles ur WHERE ur.role = 'admin';
+    RETURN 'duplicate';
+  END IF;
+
+  -- Guard amount + currency against the STORED (server-set) values and re-derive
+  -- the expected amount from the deal (defence against cross-deal reuse).
+  expected := ROUND(public.deal_buyer_payable(d) * 100)::BIGINT;
   IF p_amount_paise <> ro.amount_paise OR p_amount_paise <> expected THEN
     -- Fail safe: do NOT verify. We deliberately do not write a 'failed' row here
     -- because this RAISE aborts (and would roll back) the same transaction; the
@@ -2328,14 +2835,15 @@ $$;
 -- dedup_key makes every reminder fire at most once.
 CREATE OR REPLACE FUNCTION public.recompute_payment_states()
 RETURNS INT LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = public AS $$
-DECLARE r RECORD; n INT := 0; new_status TEXT;
+DECLARE r public.deals; n INT := 0; new_status TEXT;
 BEGIN
   FOR r IN
-    SELECT id, merchant_id, product_name, expected_buy_price, payment_due_date, payment_status, estimated_delivery_date
-    FROM public.deals
+    SELECT * FROM public.deals
     -- Only chase payment once the order proof is admin-verified (the buyer isn't
-    -- asked to pay before that).
+    -- asked to pay before that), and never while a price revision awaits the
+    -- buyer's approval (they can't pay yet) or was declined (admin resolving).
     WHERE status = 'in_progress' AND payment_due_date IS NOT NULL AND order_proof_status = 'verified'
+      AND price_revision_status IN ('none','accepted')
   LOOP
     -- Only the un-settled payment states auto-advance; verified/refunded/disputed
     -- are left untouched, but the deal is still scanned so a paid buyer still gets
@@ -2356,21 +2864,21 @@ BEGIN
 
     IF new_status = 'due' THEN
       PERFORM public.notify_and_email(r.merchant_id, 'Payment due',
-        'Payment of ₹' || r.expected_buy_price || ' for "' || r.product_name || '" is due today (delivery expected ' || to_char(r.estimated_delivery_date, 'DD Mon YYYY') || ').',
+        'Payment of ₹' || public.deal_buyer_payable(r) || ' for "' || r.product_name || '" is due today (delivery expected ' || to_char(r.estimated_delivery_date, 'DD Mon YYYY') || ').',
         'error', '/deals/' || r.id, 'pay_due:' || r.id, 'Payment due for your OfferBridge order',
-        'Your payment of ₹' || r.expected_buy_price || ' for "' || r.product_name || '" is due today.');
+        'Your payment of ₹' || public.deal_buyer_payable(r) || ' for "' || r.product_name || '" is due today.');
     ELSIF new_status = 'overdue' THEN
       PERFORM public.notify_and_email(r.merchant_id, 'Payment overdue',
-        'Payment of ₹' || r.expected_buy_price || ' for "' || r.product_name || '" is overdue. Delivery is expected ' || to_char(r.estimated_delivery_date, 'DD Mon YYYY') || '.',
+        'Payment of ₹' || public.deal_buyer_payable(r) || ' for "' || r.product_name || '" is overdue. Delivery is expected ' || to_char(r.estimated_delivery_date, 'DD Mon YYYY') || '.',
         'error', '/deals/' || r.id, 'pay_overdue:' || r.id, 'Urgent: OfferBridge payment overdue',
-        'Your payment of ₹' || r.expected_buy_price || ' for "' || r.product_name || '" is overdue.');
+        'Your payment of ₹' || public.deal_buyer_payable(r) || ' for "' || r.product_name || '" is overdue.');
     END IF;
 
     -- Expected-delivery-day reminder (once).
     IF r.estimated_delivery_date = CURRENT_DATE THEN
       PERFORM public.notify_and_email(r.merchant_id, 'Expected for delivery today',
         CASE WHEN new_status = 'verified' THEN 'Your order "' || r.product_name || '" is expected for delivery today. Please remain available.'
-             ELSE 'Your order "' || r.product_name || '" is expected today and ₹' || r.expected_buy_price || ' is still pending. Pay now to unlock any delivery OTP/PIN.' END,
+             ELSE 'Your order "' || r.product_name || '" is expected today and ₹' || public.deal_buyer_payable(r) || ' is still pending. Pay now to unlock any delivery OTP/PIN.' END,
         'info', '/deals/' || r.id, 'edd_today:' || r.id || ':' || CURRENT_DATE, 'Your OfferBridge order is expected today',
         'Your order "' || r.product_name || '" is expected for delivery today.');
     END IF;
@@ -2435,11 +2943,14 @@ RETURNS TABLE (
   commission_amount DECIMAL(10,2), required_card TEXT, admin_contact_number TEXT, status TEXT,
   customer_id UUID, advance_amount DECIMAL(10,2), remaining_amount DECIMAL(10,2),
   created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ,
-  is_reserved BOOLEAN, reserved_until TIMESTAMPTZ, server_now TIMESTAMPTZ
+  is_reserved BOOLEAN, reserved_until TIMESTAMPTZ, server_now TIMESTAMPTZ,
+  offer_details TEXT
 ) LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = public AS $$
 BEGIN
   -- Reopen any reservations that lapsed so the browse feed is always current.
   PERFORM public.expire_stale_reservations();
+  -- NOTE: no service_fee / buyer-total here — the browse feed shows the
+  -- cardholder only what THEY spend and earn.
   RETURN QUERY
   SELECT d.id, d.merchant_id, d.product_name, d.product_link, d.original_price, d.card_offer_price,
     d.expected_buy_price, d.commission_amount, d.required_card, d.admin_contact_number, d.status::TEXT,
@@ -2447,7 +2958,8 @@ BEGIN
     d.advance_amount, d.remaining_amount, d.created_at, d.updated_at,
     (d.status = 'accepted'),
     CASE WHEN d.status = 'accepted' THEN d.reserved_until ELSE NULL END,
-    now()
+    now(),
+    d.offer_details
   FROM public.deals d
   WHERE (d.status = 'approved' AND d.customer_id IS NULL)
      OR (d.status = 'accepted' AND d.reserved_until IS NOT NULL AND d.reserved_until > now())
@@ -2458,17 +2970,20 @@ $$;
 DROP FUNCTION IF EXISTS public.get_deal_accept_preview(uuid);
 CREATE OR REPLACE FUNCTION public.get_deal_accept_preview(p_deal_id UUID)
 RETURNS TABLE (
-  id UUID, product_name TEXT, required_card TEXT,
-  card_offer_price DECIMAL(10,2), commission_amount DECIMAL(10,2), delivery_address TEXT
+  id UUID, product_name TEXT, product_link TEXT, required_card TEXT, offer_details TEXT,
+  original_price DECIMAL(10,2), card_offer_price DECIMAL(10,2), commission_amount DECIMAL(10,2),
+  expected_payout DECIMAL(10,2), delivery_address TEXT
 ) LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
 BEGIN
   IF auth.uid() IS NULL THEN RAISE EXCEPTION 'Sign in to accept deals'; END IF;
-  -- The delivery address is deliberately NOT returned here. It is only revealed
-  -- after the deal is accepted (see get_deal_for_viewer), to protect the
-  -- shopper's privacy. The WHERE clause still requires a valid address so that
-  -- only genuinely acceptable deals can be previewed and accepted.
+  -- Cardholder decision info ONLY: what they spend (card_offer_price), their
+  -- reward, and their expected payout. NEVER the platform fee, the buyer's
+  -- total, the buyer's phone, or the delivery address (revealed post-accept via
+  -- get_order_delivery_details, phone-free).
   RETURN QUERY
-  SELECT d.id, d.product_name, d.required_card, d.card_offer_price, d.commission_amount, NULL::TEXT
+  SELECT d.id, d.product_name, d.product_link, d.required_card, d.offer_details,
+    d.original_price, d.card_offer_price, d.commission_amount,
+    (d.card_offer_price + d.commission_amount)::DECIMAL(10,2), NULL::TEXT
   FROM public.deals d
   WHERE d.id = p_deal_id AND d.status = 'approved' AND d.customer_id IS NULL
     AND d.merchant_id != auth.uid()
@@ -2488,7 +3003,9 @@ RETURNS TABLE (
   estimated_delivery_date DATE, payment_due_date DATE, payment_status TEXT,
   payment_reference TEXT, payment_proof_url TEXT, buyer_confirmed_at TIMESTAMPTZ,
   settled_at TIMESTAMPTZ, dispute_status TEXT, has_delivery_code BOOLEAN,
-  order_proof_status TEXT, order_proof_reason TEXT, payment_method TEXT
+  order_proof_status TEXT, order_proof_reason TEXT, payment_method TEXT,
+  offer_details TEXT, actual_purchase_price DECIMAL(10,2), price_revision_status TEXT,
+  service_fee DECIMAL(10,2), buyer_payable DECIMAL(10,2), cardholder_payout DECIMAL(10,2)
 ) LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
 BEGIN
   IF auth.uid() IS NULL THEN RAISE EXCEPTION 'Sign in to view deal details'; END IF;
@@ -2511,7 +3028,13 @@ BEGIN
     CASE WHEN public.is_admin(auth.uid()) OR d.merchant_id = auth.uid() THEN d.payment_proof_url ELSE NULL END,
     d.buyer_confirmed_at, d.settled_at, d.dispute_status,
     EXISTS (SELECT 1 FROM public.delivery_codes dc WHERE dc.deal_id = d.id AND dc.cleared_at IS NULL),
-    d.order_proof_status, d.order_proof_reason, d.payment_method
+    d.order_proof_status, d.order_proof_reason, d.payment_method,
+    d.offer_details, d.actual_purchase_price, d.price_revision_status,
+    -- Platform economics (fee + the buyer's total) are the buyer's and admin's
+    -- business — the CARDHOLDER sees only their own spend/reward/payout.
+    CASE WHEN public.is_admin(auth.uid()) OR d.merchant_id = auth.uid() THEN d.service_fee ELSE NULL END,
+    CASE WHEN public.is_admin(auth.uid()) OR d.merchant_id = auth.uid() THEN public.deal_buyer_payable(d) ELSE NULL END,
+    public.deal_cardholder_payout(d)
   FROM public.deals d
   WHERE d.id = p_deal_id AND (
     public.is_admin(auth.uid()) OR d.merchant_id = auth.uid() OR d.customer_id = auth.uid()

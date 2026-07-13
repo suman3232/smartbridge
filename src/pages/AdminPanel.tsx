@@ -182,6 +182,8 @@ export default function AdminPanel() {
     enabled: true,
   });
   const [savingConfig, setSavingConfig] = useState(false);
+  const [feeCfg, setFeeCfg] = useState({ fee_percent: "20", fee_min: "20", fee_max: "500" });
+  const [savingFee, setSavingFee] = useState(false);
   const [supportNumber, setSupportNumber] = useState("");
   const [savingSupport, setSavingSupport] = useState(false);
   const [orderQuery, setOrderQuery] = useState("");
@@ -232,7 +234,7 @@ export default function AdminPanel() {
 
   const fetchAll = async () => {
     setLoading(true);
-    const [dealsRes, kycRes, withdrawalsRes, adminsRes, referralsRes, configRes, settingsRes, resEventsRes, reliabilityRes, resCfgRes] = await Promise.all([
+    const [dealsRes, kycRes, withdrawalsRes, adminsRes, referralsRes, configRes, settingsRes, resEventsRes, reliabilityRes, resCfgRes, feeCfgRes] = await Promise.all([
       supabase.from("deals").select(DEAL_SAFE_COLUMNS).order("created_at", { ascending: false }),
       supabase.rpc("list_kycs_for_admin"),
       supabase.from("withdrawal_requests").select("*").order("created_at", { ascending: false }),
@@ -243,6 +245,7 @@ export default function AdminPanel() {
       supabase.rpc("admin_list_reservation_events", { p_limit: 100 }),
       supabase.rpc("admin_list_cardholder_reliability"),
       supabase.from("reservation_config").select("*").maybeSingle(),
+      supabase.from("platform_fee_config").select("*").maybeSingle(),
     ]);
 
     if (settingsRes.data) setSupportNumber(settingsRes.data.support_whatsapp ?? "");
@@ -264,6 +267,10 @@ export default function AdminPanel() {
       });
     }
 
+    if (feeCfgRes.data) {
+      const f = feeCfgRes.data;
+      setFeeCfg({ fee_percent: String(f.fee_percent), fee_min: String(f.fee_min), fee_max: String(f.fee_max) });
+    }
     if (referralsRes.data) setReferrals(referralsRes.data as AdminReferral[]);
     if (configRes.data) {
       const c = configRes.data;
@@ -574,6 +581,35 @@ export default function AdminPanel() {
     }
   };
 
+  const handleSaveFeeConfig = async (e: FormEvent) => {
+    e.preventDefault();
+    const pct = parseFloat(feeCfg.fee_percent) || 0;
+    const fmin = parseFloat(feeCfg.fee_min) || 0;
+    const fmax = parseFloat(feeCfg.fee_max) || 0;
+    if (pct < 0 || pct > 100) {
+      toast({ title: "Check the fee %", description: "Percent must be between 0 and 100.", variant: "destructive" });
+      return;
+    }
+    if (fmin > fmax) {
+      toast({ title: "Check the min/max", description: "Minimum fee can't exceed the maximum fee.", variant: "destructive" });
+      return;
+    }
+    setSavingFee(true);
+    // RLS: admins only. The change is audit-logged by the platform_fee_config
+    // trigger; existing deals keep their locked fee — only NEW deals use this.
+    // (DB also enforces fee_min <= fee_max and the percent range.)
+    const { error } = await supabase.from("platform_fee_config").update({
+      fee_percent: pct, fee_min: fmin, fee_max: fmax,
+    }).eq("id", true);
+    setSavingFee(false);
+    if (error) {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    } else {
+      toast({ title: "Service-fee policy saved" });
+      void fetchAll();
+    }
+  };
+
   const handleVoidReferral = async (id: string, isRewarded: boolean) => {
     setActionLoading(`ref-${id}`);
     const { error } = await supabase.rpc("admin_void_referral", {
@@ -718,7 +754,7 @@ export default function AdminPanel() {
             <p className="text-sm font-medium">₹{deal.card_offer_price.toLocaleString()}</p>
           </div>
           <div className="p-2 rounded-lg bg-success/10 text-center">
-            <p className="text-xs text-success">Commission</p>
+            <p className="text-xs text-success">Cardholder reward</p>
             <p className="text-sm font-medium text-success">₹{deal.commission_amount.toLocaleString()}</p>
           </div>
         </div>
@@ -1059,6 +1095,37 @@ export default function AdminPanel() {
           </TabsContent>
 
           <TabsContent value="referrals" className="space-y-4">
+            <Card>
+              <CardHeader>
+                <CardTitle>OfferBridge service-fee policy</CardTitle>
+                <CardDescription>
+                  fee = clamp(reward × percent, min, max). Locked onto each deal at creation — changing this affects only NEW requests. All changes are audit-logged.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <form onSubmit={handleSaveFeeConfig} className="space-y-4">
+                  <div className="grid sm:grid-cols-3 gap-4">
+                    <div>
+                      <Label htmlFor="fp">Fee percent (% of reward)</Label>
+                      <Input id="fp" type="number" min="0" max="100" step="0.01" value={feeCfg.fee_percent}
+                        onChange={(e) => setFeeCfg((c) => ({ ...c, fee_percent: e.target.value }))} className="mt-1" />
+                    </div>
+                    <div>
+                      <Label htmlFor="fmin">Minimum fee (₹)</Label>
+                      <Input id="fmin" type="number" min="0" step="1" value={feeCfg.fee_min}
+                        onChange={(e) => setFeeCfg((c) => ({ ...c, fee_min: e.target.value }))} className="mt-1" />
+                    </div>
+                    <div>
+                      <Label htmlFor="fmax">Maximum fee (₹)</Label>
+                      <Input id="fmax" type="number" min="0" step="1" value={feeCfg.fee_max}
+                        onChange={(e) => setFeeCfg((c) => ({ ...c, fee_max: e.target.value }))} className="mt-1" />
+                    </div>
+                  </div>
+                  <Button type="submit" disabled={savingFee}>{savingFee ? "Saving…" : "Save fee policy"}</Button>
+                </form>
+              </CardContent>
+            </Card>
+
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2">

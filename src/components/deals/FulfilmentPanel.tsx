@@ -6,7 +6,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { FileUpload } from "@/components/ui/file-upload";
 import { useToast } from "@/hooks/use-toast";
-import { supabase, Deal, OrderRow, PaymentStatus } from "@/lib/supabase";
+import { supabase, OrderRow, PaymentStatus, ViewerDeal } from "@/lib/supabase";
 import { ORDER_SCREENSHOT_BUCKET, getSignedUrl } from "@/lib/storage";
 import { Loader2, Truck, IndianRupee, ShieldCheck, KeyRound, PackageCheck, AlertTriangle, Lock, ClipboardCheck } from "lucide-react";
 
@@ -42,7 +42,7 @@ function loadRazorpay(): Promise<boolean> {
 }
 
 interface Props {
-  deal: Deal;
+  deal: ViewerDeal;
   order: OrderRow | null;
   isBuyer: boolean;
   isCardHolder: boolean;
@@ -66,6 +66,7 @@ export function FulfilmentPanel({ deal, order, isBuyer, isCardHolder, isAdmin, o
   const [codeValue, setCodeValue] = useState("");
   const [revealed, setRevealed] = useState<string | null>(null);
   const [reviewReason, setReviewReason] = useState("");
+  const [actualAmt, setActualAmt] = useState<string>(order?.amount_paid ? String(order.amount_paid) : "");
   const [shotUrl, setShotUrl] = useState<string | null>(null);
   // Resubmit form
   const [rOrderId, setROrderId] = useState(order?.marketplace_order_id ?? "");
@@ -74,6 +75,10 @@ export function FulfilmentPanel({ deal, order, isBuyer, isCardHolder, isAdmin, o
 
   const pay = PAYMENT_LABEL[deal.payment_status] ?? PAYMENT_LABEL.not_due;
   const proofVerified = deal.order_proof_status === "verified";
+  // Buyer total from the server pricing authority (legacy deals fall back).
+  const payable = deal.buyer_payable ?? deal.expected_buy_price;
+  const revisionPending = deal.price_revision_status === "pending_buyer";
+  const revisionDeclined = deal.price_revision_status === "declined";
   const needsCode = (order?.delivery_code_type ?? "none") !== "none";
 
   const run = async (key: string, fn: () => Promise<{ error: { message: string } | null }>, ok: string) => {
@@ -168,17 +173,28 @@ export function FulfilmentPanel({ deal, order, isBuyer, isCardHolder, isAdmin, o
               <p><span className="text-muted-foreground">Order ID:</span> {order.marketplace_order_id || "—"}</p>
               <p><span className="text-muted-foreground">Platform:</span> {order.platform || "—"}</p>
               <p><span className="text-muted-foreground">Est. delivery:</span> {fmtDate(deal.estimated_delivery_date)}</p>
-              <p><span className="text-muted-foreground">Amount payable:</span> ₹{deal.expected_buy_price.toLocaleString()}</p>
+              <p><span className="text-muted-foreground">Posted price after offer:</span> ₹{deal.card_offer_price.toLocaleString()}</p>
+              <p><span className="text-muted-foreground">Cardholder reward:</span> ₹{deal.commission_amount.toLocaleString()}</p>
+              {deal.service_fee != null && <p><span className="text-muted-foreground">Service fee:</span> ₹{deal.service_fee.toLocaleString()}</p>}
             </div>
             {order.order_screenshot_url && (
               <Button variant="outline" size="sm" onClick={viewScreenshot}>{shotUrl ? "Re-open screenshot" : "View order screenshot"}</Button>
+            )}
+            {deal.service_fee != null && (
+              <div>
+                <Label htmlFor="actual-amt">Actual purchase amount (₹) — from the order proof</Label>
+                <Input id="actual-amt" type="number" min="1" step="0.01" value={actualAmt} onChange={(e) => setActualAmt(e.target.value)} placeholder={String(deal.card_offer_price)} className="mt-1" />
+                <p className="text-[11px] text-muted-foreground mt-1">
+                  Becomes the reimbursement base and part of the buyer's total. If it exceeds the posted ₹{deal.card_offer_price.toLocaleString()}, the buyer must approve the revised total before being asked to pay.
+                </p>
+              </div>
             )}
             <div>
               <Label htmlFor="rev-reason">Reason (required to reject / request correction)</Label>
               <Input id="rev-reason" value={reviewReason} onChange={(e) => setReviewReason(e.target.value)} placeholder="e.g. screenshot unclear, order ID mismatch" className="mt-1" />
             </div>
             <div className="flex flex-wrap gap-2">
-              <Button onClick={() => run("approve", () => supabase.rpc("admin_verify_order_proof", { p_deal_id: deal.id, p_action: "approve" }), "Order proof approved — buyer asked to pay")} disabled={!!busy}>
+              <Button onClick={() => run("approve", () => supabase.rpc("admin_verify_order_proof", { p_deal_id: deal.id, p_action: "approve", p_actual_amount: deal.service_fee != null ? (parseFloat(actualAmt) || null) : null }), "Order proof approved")} disabled={!!busy || (deal.service_fee != null && !(parseFloat(actualAmt) > 0))}>
                 {busy === "approve" ? <Loader2 className="w-4 h-4 animate-spin" /> : "Approve"}
               </Button>
               <Button variant="outline" onClick={() => run("correction", () => supabase.rpc("admin_verify_order_proof", { p_deal_id: deal.id, p_action: "correction", p_reason: reviewReason }), "Correction requested")} disabled={!!busy || !reviewReason.trim()}>Request correction</Button>
@@ -268,11 +284,53 @@ export function FulfilmentPanel({ deal, order, isBuyer, isCardHolder, isAdmin, o
         </Card>
       )}
 
-      {/* BUYER: pay (only after order proof verified) */}
-      {isBuyer && order && proofVerified && deal.payment_status !== "verified" && deal.status === "in_progress" && (
+      {/* BUYER: price revision approval (actual price came in higher) */}
+      {isBuyer && revisionPending && (
+        <Card className="border-warning/40">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base"><AlertTriangle className="w-4 h-4" /> Price changed — your approval needed</CardTitle>
+            <CardDescription>
+              The verified purchase price is ₹{(deal.actual_purchase_price ?? 0).toLocaleString()} (you agreed to ₹{deal.card_offer_price.toLocaleString()}).
+              Revised total: <span className="font-semibold text-foreground">₹{payable.toLocaleString()}</span>. You won't be charged unless you accept.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-wrap gap-2">
+            <Button onClick={() => run("rev-ok", () => supabase.rpc("buyer_respond_price_revision", { p_deal_id: deal.id, p_accept: true }), "Revised total accepted — you can pay now")} disabled={!!busy}>
+              {busy === "rev-ok" ? <Loader2 className="w-4 h-4 animate-spin" /> : `Accept ₹${payable.toLocaleString()}`}
+            </Button>
+            <Button variant="destructive" onClick={() => run("rev-no", () => supabase.rpc("buyer_respond_price_revision", { p_deal_id: deal.id, p_accept: false }), "Declined — an admin will resolve this")} disabled={!!busy}>Decline</Button>
+          </CardContent>
+        </Card>
+      )}
+      {revisionDeclined && isBuyer && (
+        <Card><CardContent className="p-4 text-sm text-muted-foreground">
+          You declined the revised price. An admin will resolve this order — re-verify with a corrected amount, or cancel and refund.
+        </CardContent></Card>
+      )}
+      {revisionDeclined && isAdmin && (
+        <Card className="border-warning/40">
+          <CardHeader><CardTitle className="text-base">Resolve declined price revision</CardTitle></CardHeader>
+          <CardContent className="space-y-3">
+            <div>
+              <Label htmlFor="resolve-amt">Corrected actual amount (₹)</Label>
+              <Input id="resolve-amt" type="number" min="1" step="0.01" value={actualAmt} onChange={(e) => setActualAmt(e.target.value)} placeholder={String(deal.card_offer_price)} className="mt-1" />
+              <p className="text-[11px] text-muted-foreground mt-1">≤ ₹{deal.card_offer_price.toLocaleString()} bills the buyer straight away; higher re-asks the buyer to approve.</p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button onClick={() => run("resolve-reverify", () => supabase.rpc("admin_resolve_price_revision", { p_deal_id: deal.id, p_action: "reverify", p_new_actual_amount: parseFloat(actualAmt) || null }), "Order re-verified")} disabled={!!busy || !(parseFloat(actualAmt) > 0)}>
+                {busy === "resolve-reverify" ? <Loader2 className="w-4 h-4 animate-spin" /> : "Re-verify with corrected amount"}
+              </Button>
+              <Button variant="destructive" onClick={() => run("resolve-cancel", () => supabase.rpc("admin_resolve_price_revision", { p_deal_id: deal.id, p_action: "cancel", p_notes: reviewReason || null }), "Order cancelled")} disabled={!!busy}>Cancel order</Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* BUYER: pay (only after order proof verified + no unresolved revision) */}
+      {isBuyer && order && proofVerified && !revisionPending && !revisionDeclined && deal.payment_status !== "verified" && deal.status === "in_progress" && (
         <Card className="border-primary/30">
           <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base"><IndianRupee className="w-4 h-4" /> Pay ₹{deal.expected_buy_price.toLocaleString()}</CardTitle>
+            <CardTitle className="flex items-center gap-2 text-base"><IndianRupee className="w-4 h-4" /> Pay ₹{payable.toLocaleString()}</CardTitle>
             <CardDescription>
               Due by <span className="font-medium text-foreground">{fmtDate(deal.payment_due_date)}</span> (one day before delivery).
               {deal.payment_status === "submitted" && " — Your manual payment is under verification."}
@@ -280,7 +338,7 @@ export function FulfilmentPanel({ deal, order, isBuyer, isCardHolder, isAdmin, o
           </CardHeader>
           <CardContent className="space-y-3">
             <Button onClick={payWithRazorpay} disabled={!!busy} className="w-full">
-              {busy === "rzp" ? <Loader2 className="w-4 h-4 animate-spin" /> : `Pay ₹${deal.expected_buy_price.toLocaleString()} now`}
+              {busy === "rzp" ? <Loader2 className="w-4 h-4 animate-spin" /> : `Pay ₹${payable.toLocaleString()} now`}
             </Button>
             <button type="button" className="text-xs text-muted-foreground hover:text-foreground underline" onClick={() => setManualOpen((v) => !v)}>
               {manualOpen ? "Hide" : "Paid another way? Submit proof for manual verification"}
@@ -355,7 +413,31 @@ export function FulfilmentPanel({ deal, order, isBuyer, isCardHolder, isAdmin, o
       )}
 
       {isBuyer && deal.buyer_confirmed_at && deal.status === "in_progress" && (
-        <Card className="border-success/20 bg-success/5"><CardContent className="p-4 text-sm text-muted-foreground">You confirmed receipt. An admin will settle the card holder's reimbursement + commission.</CardContent></Card>
+        <Card className="border-success/20 bg-success/5"><CardContent className="p-4 text-sm text-muted-foreground">You confirmed receipt. An admin will settle the card holder's reimbursement + reward.</CardContent></Card>
+      )}
+
+      {/* ADMIN: full financial breakdown (fee + revenue are admin/buyer-only data) */}
+      {isAdmin && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base"><IndianRupee className="w-4 h-4" /> Financial breakdown</CardTitle>
+            <CardDescription>Server-authoritative amounts for this deal</CardDescription>
+          </CardHeader>
+          <CardContent className="grid sm:grid-cols-2 gap-x-6 gap-y-1 text-sm">
+            <p><span className="text-muted-foreground">Original price:</span> ₹{deal.original_price.toLocaleString()}</p>
+            <p><span className="text-muted-foreground">Posted price after offer:</span> ₹{deal.card_offer_price.toLocaleString()}</p>
+            <p><span className="text-muted-foreground">Actual verified amount:</span> {deal.actual_purchase_price != null ? `₹${deal.actual_purchase_price.toLocaleString()}` : "— (set at proof approval)"}</p>
+            <p><span className="text-muted-foreground">Cardholder reward:</span> ₹{deal.commission_amount.toLocaleString()}</p>
+            <p><span className="text-muted-foreground">OfferBridge service fee:</span> {deal.service_fee != null ? `₹${deal.service_fee.toLocaleString()}` : "— (legacy deal)"}</p>
+            <p><span className="text-muted-foreground">Buyer pays (total):</span> ₹{payable.toLocaleString()}</p>
+            <p><span className="text-muted-foreground">Buyer saves:</span> ₹{Math.max(0, deal.original_price - payable).toLocaleString()}</p>
+            <p><span className="text-muted-foreground">Cardholder payout:</span> ₹{(deal.cardholder_payout ?? deal.card_offer_price + deal.commission_amount).toLocaleString()}</p>
+            <p><span className="text-muted-foreground">Payment:</span> {deal.payment_status}{deal.payment_method ? ` (${deal.payment_method})` : ""}</p>
+            <p><span className="text-muted-foreground">Payment ref:</span> {deal.payment_reference || "—"}</p>
+            <p><span className="text-muted-foreground">Price revision:</span> {deal.price_revision_status}</p>
+            <p><span className="text-muted-foreground">Settled:</span> {deal.settled_at ? new Date(deal.settled_at).toLocaleString() : "not yet"}</p>
+          </CardContent>
+        </Card>
       )}
     </div>
   );

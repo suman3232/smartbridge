@@ -46,15 +46,23 @@ Deno.serve(async (req) => {
 
   const { data: deal, error: dErr } = await admin
     .from("deals")
-    .select("id, merchant_id, product_name, expected_buy_price, order_proof_status, payment_status")
+    .select("id, merchant_id, order_proof_status, payment_status, price_revision_status")
     .eq("id", body.deal_id).maybeSingle();
   if (dErr) return json({ error: dErr.message }, 500);
   if (!deal) return json({ error: "Deal not found" }, 404);
   if (deal.merchant_id !== user.id) return json({ error: "Only the buyer can pay for this order" }, 403);
   if (deal.order_proof_status !== "verified") return json({ error: "Payment opens after the order proof is verified" }, 409);
   if (deal.payment_status === "verified") return json({ error: "This order is already paid" }, 409);
+  if (deal.price_revision_status === "pending_buyer") return json({ error: "Please accept or decline the revised price first" }, 409);
+  if (deal.price_revision_status === "declined") return json({ error: "Awaiting admin resolution of the declined price revision" }, 409);
 
-  const amountPaise = Math.round(Number(deal.expected_buy_price) * 100);
+  // The amount comes EXCLUSIVELY from the DB pricing authority (actual verified
+  // price + cardholder reward + service fee; legacy deals fall back inside).
+  // No money is ever computed in TypeScript.
+  const { data: quoteRows, error: qErr } = await admin.rpc("get_deal_payment_quote", { p_deal_id: deal.id });
+  if (qErr) return json({ error: qErr.message }, 500);
+  const quote = Array.isArray(quoteRows) ? quoteRows[0] : quoteRows;
+  const amountPaise = Number(quote?.amount_paise);
   if (!Number.isFinite(amountPaise) || amountPaise <= 0) return json({ error: "Invalid amount" }, 400);
 
   // Create the order on Razorpay (server-side, Basic auth).
@@ -87,6 +95,6 @@ Deno.serve(async (req) => {
     razorpay_order_id: rzp.id,
     amount: amountPaise,
     currency: "INR",
-    product_name: deal.product_name,
+    product_name: quote?.product_name ?? "OfferBridge order",
   });
 });

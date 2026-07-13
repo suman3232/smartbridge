@@ -110,7 +110,7 @@ function BrowseDealsContent({
         <PageHeader
           eyebrow="Browse deals"
           title="Earn with your card"
-          description="Accept shopping requests — get reimbursed plus commission after delivery."
+          description="Accept shopping requests — get reimbursed plus your reward after delivery."
           actions={
             <div className="relative w-full sm:w-72">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
@@ -200,16 +200,24 @@ function BrowseDealsContent({
                   </div>
                 </CardHeader>
                 <CardContent className="space-y-4">
+                  {/* Cardholder decision info ONLY — no platform fee, no buyer total. */}
                   <div className="grid grid-cols-2 gap-3">
                     <div className="p-3 rounded-xl bg-secondary/50">
-                      <p className="text-xs text-muted-foreground">You pay at checkout</p>
+                      <p className="text-xs text-muted-foreground">You spend</p>
                       <p className="font-semibold">₹{deal.card_offer_price.toLocaleString()}</p>
+                      <p className="text-[11px] text-muted-foreground line-through">₹{deal.original_price.toLocaleString()}</p>
                     </div>
                     <div className="p-3 rounded-xl bg-success/10">
-                      <p className="text-xs text-success">Your commission</p>
+                      <p className="text-xs text-success">Your reward</p>
                       <p className="font-semibold text-success">₹{deal.commission_amount.toLocaleString()}</p>
+                      <p className="text-[11px] text-success/80">
+                        Payout ₹{(deal.card_offer_price + deal.commission_amount).toLocaleString()}
+                      </p>
                     </div>
                   </div>
+                  {deal.offer_details && (
+                    <p className="text-xs text-muted-foreground line-clamp-2">{deal.offer_details}</p>
+                  )}
 
                   {deal.is_reserved ? (
                     <div className="flex items-center justify-between gap-2 rounded-xl bg-secondary/40 p-3">

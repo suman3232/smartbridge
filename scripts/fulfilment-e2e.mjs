@@ -139,7 +139,7 @@ if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
     const selfApprove = await holder.c.rpc('admin_verify_order_proof', { p_deal_id: D, p_action: 'approve' });
     sec('card holder CANNOT approve their own order proof', !!selfApprove.error);
     const nBefore = (await buyer.c.from('notifications').select('id', { count: 'exact', head: true }).eq('user_id', buyer.id).eq('dedup_key', `pay_request:${D}`)).count ?? 0;
-    const approve = await admin.rpc('admin_verify_order_proof', { p_deal_id: D, p_action: 'approve' });
+    const approve = await admin.rpc('admin_verify_order_proof', { p_deal_id: D, p_action: 'approve', p_actual_amount: 800 });
     rec('admin approves order proof', !approve.error && approve.data?.order_proof_status === 'verified', approve.error?.message);
     const nAfter = (await buyer.c.from('notifications').select('id', { count: 'exact', head: true }).eq('user_id', buyer.id).eq('dedup_key', `pay_request:${D}`)).count ?? 0;
     rec('buyer gets payment request ONLY after approval', nBefore === 0 && nAfter === 1, `before=${nBefore} after=${nAfter}`);

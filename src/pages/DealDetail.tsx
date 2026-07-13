@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/hooks/use-toast";
-import { supabase, Deal, OrderRow } from "@/lib/supabase";
+import { supabase, Deal, OrderRow, ViewerDeal } from "@/lib/supabase";
 import { FileUpload } from "@/components/ui/file-upload";
 import { ORDER_SCREENSHOT_BUCKET, getSignedUrl } from "@/lib/storage";
 import {
@@ -46,7 +46,7 @@ export default function DealDetail() {
 
   const supportNumber = useSupportWhatsApp();
   const reservationWindow = useReservationWindow();
-  const [deal, setDeal] = useState<Deal | null>(null);
+  const [deal, setDeal] = useState<ViewerDeal | null>(null);
   const [order, setOrder] = useState<OrderRow | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
@@ -78,7 +78,7 @@ export default function DealDetail() {
     if (dealRes.data?.[0]) {
       const row = dealRes.data[0];
       setServerNow(row.server_now ?? null);
-      setDeal(row as Deal);
+      setDeal(row as ViewerDeal);
     } else if (!dealRes.error) {
       // Zero rows without an error: the viewer lost access (e.g. their
       // reservation expired and someone else took the deal). Clear stale state
@@ -270,23 +270,54 @@ export default function DealDetail() {
             <CardTitle>Pricing</CardTitle>
             <CardDescription>Agreed amounts for this deal</CardDescription>
           </CardHeader>
-          <CardContent className="grid sm:grid-cols-2 gap-4">
-            <div className="p-4 rounded-xl bg-secondary/50">
-              <p className="text-xs text-muted-foreground">Original price</p>
-              <p className="text-lg font-semibold line-through text-muted-foreground">₹{deal.original_price.toLocaleString()}</p>
+          <CardContent className="space-y-4">
+            <div className="grid sm:grid-cols-2 gap-4">
+              <div className="p-4 rounded-xl bg-secondary/50">
+                <p className="text-xs text-muted-foreground">Original price</p>
+                <p className="text-lg font-semibold line-through text-muted-foreground">₹{deal.original_price.toLocaleString()}</p>
+              </div>
+              <div className="p-4 rounded-xl bg-primary/10">
+                <p className="text-xs text-primary">{isCardHolder ? "You spend (price after card offer)" : "Price after card offer"}</p>
+                <p className="text-lg font-bold text-primary">
+                  ₹{(deal.actual_purchase_price ?? deal.card_offer_price).toLocaleString()}
+                </p>
+                {deal.actual_purchase_price != null && deal.actual_purchase_price !== deal.card_offer_price && (
+                  <p className="text-[11px] text-muted-foreground">admin-verified actual (posted ₹{deal.card_offer_price.toLocaleString()})</p>
+                )}
+              </div>
+              <div className="p-4 rounded-xl bg-success/10">
+                <p className="text-xs text-success">Cardholder reward</p>
+                <p className="text-lg font-bold text-success">₹{deal.commission_amount.toLocaleString()}</p>
+              </div>
+              {isCardHolder ? (
+                <div className="p-4 rounded-xl bg-success/10">
+                  <p className="text-xs text-success">Your expected total payout</p>
+                  <p className="text-lg font-bold text-success">
+                    ₹{(deal.cardholder_payout ?? deal.card_offer_price + deal.commission_amount).toLocaleString()}
+                  </p>
+                  <p className="text-[11px] text-success/80">reimbursement + reward after settlement</p>
+                </div>
+              ) : (
+                // Buyer + admin: full economics (fee + total). NEVER shown to the cardholder.
+                <div className="p-4 rounded-xl bg-secondary/50 space-y-1">
+                  {deal.service_fee != null && (
+                    <div className="flex justify-between text-xs">
+                      <span className="text-muted-foreground">OfferBridge service fee</span>
+                      <span className="font-medium">₹{deal.service_fee.toLocaleString()}</span>
+                    </div>
+                  )}
+                  <p className="text-xs text-muted-foreground">{isShopper ? "Total you pay" : "Buyer pays (total)"}</p>
+                  <p className="text-lg font-semibold">
+                    ₹{(deal.buyer_payable ?? deal.expected_buy_price).toLocaleString()}
+                  </p>
+                </div>
+              )}
             </div>
-            <div className="p-4 rounded-xl bg-primary/10">
-              <p className="text-xs text-primary">Card offer price (you pay at checkout)</p>
-              <p className="text-lg font-bold text-primary">₹{deal.card_offer_price.toLocaleString()}</p>
-            </div>
-            <div className="p-4 rounded-xl bg-secondary/50">
-              <p className="text-xs text-muted-foreground">Shopper pays (total)</p>
-              <p className="text-lg font-semibold">₹{deal.expected_buy_price.toLocaleString()}</p>
-            </div>
-            <div className="p-4 rounded-xl bg-success/10">
-              <p className="text-xs text-success">Card holder earns (commission)</p>
-              <p className="text-lg font-bold text-success">₹{deal.commission_amount.toLocaleString()}</p>
-            </div>
+            {deal.offer_details && (
+              <p className="text-xs text-muted-foreground border-t border-white/[0.06] pt-3">
+                <span className="font-medium text-foreground">Offer details:</span> {deal.offer_details}
+              </p>
+            )}
           </CardContent>
         </Card>
 
@@ -526,7 +557,10 @@ export default function DealDetail() {
             <CardHeader>
               <CardTitle>Admin: complete deal</CardTitle>
               <CardDescription>
-                Once you've confirmed the shopper received the product and settled payment, complete the deal to credit reimbursement (₹{deal.card_offer_price.toLocaleString()}) + commission (₹{deal.commission_amount.toLocaleString()}) to the card holder's wallet.
+                Once the buyer has confirmed receipt, complete the deal to credit the card holder's wallet with
+                reimbursement (₹{(deal.actual_purchase_price ?? deal.card_offer_price).toLocaleString()}) + reward (₹{deal.commission_amount.toLocaleString()})
+                = ₹{(deal.cardholder_payout ?? deal.card_offer_price + deal.commission_amount).toLocaleString()}
+                {deal.service_fee != null && <> — OfferBridge records ₹{deal.service_fee.toLocaleString()} service fee as platform revenue</>}.
               </CardDescription>
             </CardHeader>
             <CardContent>

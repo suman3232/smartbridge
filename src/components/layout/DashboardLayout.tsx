@@ -1,5 +1,5 @@
 import { ReactNode, useState } from "react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -49,6 +49,14 @@ export function DashboardLayout({ children }: { children: ReactNode }) {
     await signOut();
     navigate("/");
   };
+
+  // MANDATORY phone number: Google/OAuth signups arrive without one, but every
+  // flow (deal contact, delivery coordination) requires it. Until a phone is
+  // saved, every in-app page redirects to Profile — the user cannot proceed.
+  const needsPhone = !!profile && !profile.phone?.trim();
+  if (needsPhone && location.pathname !== "/profile") {
+    return <Navigate to="/profile?phone=required" replace />;
+  }
 
   const isActive = (href: string) => location.pathname === href;
 

@@ -245,7 +245,7 @@ export default function Dashboard() {
                       </div>
                       <div className="text-right">
                         <Badge variant={statusVariant(deal.status)} className="capitalize">{deal.status.replace("_", " ")}</Badge>
-                        <p className="num mt-1 text-sm font-medium">₹{deal.card_offer_price.toLocaleString()}</p>
+                        <p className="num mt-1 text-sm font-medium" title="Price after card offer">₹{deal.card_offer_price.toLocaleString()}</p>
                       </div>
                     </Link>
                   ))}

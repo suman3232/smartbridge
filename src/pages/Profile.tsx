@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { DashboardLayout } from "@/components/layout/DashboardLayout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -16,7 +16,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/lib/supabase";
 import { isValidPhone } from "@/lib/validation";
-import { ArrowLeft, Loader2, User } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Loader2, User } from "lucide-react";
 
 const roleOptions = [
   { value: "create_deals", label: "Shopper — post requests" },
@@ -27,7 +27,12 @@ const roleOptions = [
 export default function Profile() {
   const { profile, user, refreshProfile } = useAuth();
   const { toast } = useToast();
+  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [saving, setSaving] = useState(false);
+  // The DashboardLayout gate sends phone-less users (e.g. Google sign-ups) here
+  // with ?phone=required — they cannot use the app until a number is saved.
+  const phoneGated = searchParams.get("phone") === "required" || (!!profile && !profile.phone?.trim());
   const [form, setForm] = useState({
     full_name: "",
     phone: "",
@@ -78,6 +83,8 @@ export default function Profile() {
     } else {
       toast({ title: "Profile updated" });
       await refreshProfile();
+      // If they were gated here for a missing phone, continue into the app now.
+      if (phoneGated) navigate("/dashboard", { replace: true });
     }
   };
 
@@ -85,16 +92,34 @@ export default function Profile() {
     <DashboardLayout>
       <div className="max-w-xl mx-auto space-y-6">
         <div className="flex items-center gap-4">
-          <Link to="/dashboard">
-            <Button variant="ghost" size="icon" className="rounded-xl">
-              <ArrowLeft className="w-5 h-5" />
-            </Button>
-          </Link>
+          {!phoneGated && (
+            <Link to="/dashboard">
+              <Button variant="ghost" size="icon" className="rounded-xl">
+                <ArrowLeft className="w-5 h-5" />
+              </Button>
+            </Link>
+          )}
           <div>
             <h1 className="text-2xl font-bold">Profile & settings</h1>
             <p className="text-muted-foreground text-sm">Manage your account details</p>
           </div>
         </div>
+
+        {phoneGated && (
+          <Card className="border-warning/40 bg-warning/10">
+            <CardContent className="flex items-start gap-3 p-4">
+              <AlertTriangle className="w-5 h-5 text-warning mt-0.5 shrink-0" />
+              <div>
+                <p className="text-sm font-semibold">Add your mobile number to continue</p>
+                <p className="text-sm text-muted-foreground mt-0.5">
+                  A contact number is required before you can use OfferBridge — it's how the admin
+                  coordinates your deals and deliveries. Your number stays private and is never shown
+                  to other users.
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
         <Card>
           <CardHeader>

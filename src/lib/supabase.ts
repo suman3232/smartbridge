@@ -41,11 +41,14 @@ export type Deal = {
   product_name: string;
   product_link: string;
   original_price: number;
-  card_offer_price: number;
-  expected_buy_price: number;
+  card_offer_price: number;       // price after card offer (what the cardholder spends)
+  expected_buy_price: number;     // legacy buyer-total; new-model deals mirror card_offer_price
   advance_amount: number;
   remaining_amount: number;
-  commission_amount: number;
+  commission_amount: number;      // Cardholder Reward (kept under the legacy column name)
+  offer_details: string | null;   // optional buyer note about the card offer
+  actual_purchase_price: number | null;  // admin-verified actual spend (set at proof approval)
+  price_revision_status: 'none' | 'pending_buyer' | 'accepted' | 'declined';
   required_card: string;
   delivery_address: string | null;
   admin_contact_number: string | null;
@@ -71,16 +74,33 @@ export type Deal = {
 };
 
 // Columns a client may read directly from `deals`. The private delivery/payment
-// columns are column-level REVOKEd (buyer phone privacy) — reading them via
+// columns AND service_fee are column-level REVOKEd (buyer phone privacy; the
+// platform fee is never readable by the cardholder) — reading them via
 // `select('*')` errors. Participants get those fields only through the masking
-// SECURITY DEFINER RPCs (get_deal_for_viewer / get_order_delivery_details).
+// SECURITY DEFINER RPCs (get_deal_for_viewer / get_order_delivery_details),
+// which return service_fee/buyer_payable to the buyer + admin only.
 export const DEAL_SAFE_COLUMNS =
   "id, merchant_id, customer_id, product_name, product_link, original_price, card_offer_price, " +
-  "expected_buy_price, advance_amount, remaining_amount, commission_amount, required_card, " +
+  "expected_buy_price, advance_amount, remaining_amount, commission_amount, offer_details, " +
+  "actual_purchase_price, price_revision_status, required_card, " +
   "admin_contact_number, reserved_at, reserved_until, estimated_delivery_date, payment_due_date, " +
   "payment_status, payment_method, order_proof_status, order_proof_verified_at, order_proof_reason, " +
   "payment_submitted_at, payment_verified_at, buyer_confirmed_at, settled_at, " +
   "dispute_status, status, admin_notes, created_at, updated_at";
+
+/** Service-fee policy (platform_fee_config singleton — readable by any signed-in user). */
+export type FeePolicy = {
+  fee_percent: number;
+  fee_min: number;
+  fee_max: number;
+};
+
+/** Client-side MIRROR of the fee formula for live display ONLY — the backend
+ * trigger recomputes the authoritative fee on insert and ignores client values. */
+export function computeServiceFee(reward: number, policy: FeePolicy): number {
+  if (!Number.isFinite(reward) || reward < 0) reward = 0;
+  return Math.round(Math.min(Math.max((reward * policy.fee_percent) / 100, policy.fee_min), policy.fee_max));
+}
 
 export type PaymentStatus =
   | 'not_due' | 'due_soon' | 'due' | 'overdue'
@@ -140,6 +160,16 @@ export type OpenDeal = Omit<Deal, "delivery_address" | "admin_notes" | "reserved
   is_reserved: boolean;
   reserved_until: string | null;
   server_now: string;
+};
+
+/** get_deal_for_viewer row: Deal + server-computed money fields. service_fee and
+ * buyer_payable are role-masked (NULL for the cardholder); cardholder_payout is
+ * what the cardholder receives at settlement (actual verified spend + reward). */
+export type ViewerDeal = Deal & {
+  server_now?: string;
+  service_fee: number | null;
+  buyer_payable: number | null;
+  cardholder_payout: number | null;
 };
 
 /** Caller's live reservation + cooldown state (get_my_reservation_status). */

@@ -48,6 +48,10 @@ export type Database = {
           advance_amount: number
           card_offer_price: number
           commission_amount: number
+          offer_details: string | null
+          service_fee: number | null
+          actual_purchase_price: number | null
+          price_revision_status: string
           created_at: string | null
           customer_id: string | null
           delivery_address: string | null
@@ -87,9 +91,10 @@ export type Database = {
         Insert: {
           admin_contact_number?: string | null
           admin_notes?: string | null
-          advance_amount: number
+          advance_amount?: number
           card_offer_price: number
           commission_amount: number
+          offer_details?: string | null
           created_at?: string | null
           customer_id?: string | null
           delivery_address?: string | null
@@ -113,13 +118,13 @@ export type Database = {
           buyer_confirmed_at?: string | null
           settled_at?: string | null
           dispute_status?: string | null
-          expected_buy_price: number
+          expected_buy_price?: number
           id?: string
           merchant_id: string
           original_price: number
           product_link: string
           product_name: string
-          remaining_amount: number
+          remaining_amount?: number
           required_card: string
           reserved_at?: string | null
           reserved_until?: string | null
@@ -821,6 +826,18 @@ export type Database = {
         }
         Relationships: []
       }
+      platform_fee_config: {
+        Row: { id: boolean; fee_percent: number; fee_min: number; fee_max: number; updated_at: string }
+        Insert: { id?: boolean; fee_percent?: number; fee_min?: number; fee_max?: number }
+        Update: { fee_percent?: number; fee_min?: number; fee_max?: number }
+        Relationships: []
+      }
+      platform_revenue: {
+        Row: { id: string; deal_id: string; amount: number; source: string; created_at: string }
+        Insert: { deal_id: string; amount: number; source?: string }
+        Update: { amount?: number }
+        Relationships: []
+      }
       referrals: {
         Row: {
           id: string
@@ -1029,7 +1046,15 @@ export type Database = {
         Returns: Database["public"]["Tables"]["deals"]["Row"]
       }
       admin_verify_order_proof: {
-        Args: { p_deal_id: string; p_action: string; p_reason?: string | null }
+        Args: { p_deal_id: string; p_action: string; p_reason?: string | null; p_actual_amount?: number | null }
+        Returns: Database["public"]["Tables"]["deals"]["Row"]
+      }
+      buyer_respond_price_revision: {
+        Args: { p_deal_id: string; p_accept: boolean }
+        Returns: Database["public"]["Tables"]["deals"]["Row"]
+      }
+      admin_resolve_price_revision: {
+        Args: { p_deal_id: string; p_action: string; p_new_actual_amount?: number | null; p_notes?: string | null }
         Returns: Database["public"]["Tables"]["deals"]["Row"]
       }
       set_delivery_code: {
@@ -1112,6 +1137,7 @@ export type Database = {
           is_reserved: boolean
           reserved_until: string | null
           server_now: string
+          offer_details: string | null
         }[]
       }
       get_deal_accept_preview: {
@@ -1119,9 +1145,13 @@ export type Database = {
         Returns: {
           id: string
           product_name: string
+          product_link: string
           required_card: string
+          offer_details: string | null
+          original_price: number
           card_offer_price: number
           commission_amount: number
+          expected_payout: number
           delivery_address: string | null
         }[]
       }
@@ -1161,6 +1191,12 @@ export type Database = {
           order_proof_status: string
           order_proof_reason: string | null
           payment_method: string | null
+          offer_details: string | null
+          actual_purchase_price: number | null
+          price_revision_status: string
+          service_fee: number | null
+          buyer_payable: number | null
+          cardholder_payout: number | null
         }[]
       }
       release_deal: {

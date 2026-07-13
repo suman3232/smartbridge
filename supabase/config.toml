@@ -1,1 +1,10 @@
 project_id = "mdgmgpsdobxjddfpdtxg"
+
+# Signup OTP: the Confirm-signup email must contain the 6-digit {{ .Token }}
+# (template: supabase/templates/confirmation-otp.html) and Email OTP Length
+# must be 6. Configure BOTH in the Dashboard:
+#   Auth → Email Templates → "Confirm signup"  → paste the template
+#   Auth → Providers → Email → "Email OTP Length" → 6
+# ⚠ Do NOT use `supabase config push` for this — it pushes the ENTIRE [auth]
+# section and would reset site_url / redirect URLs / Google OAuth / MFA to the
+# local defaults, breaking production login.

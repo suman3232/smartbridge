@@ -11,9 +11,13 @@ import { AlertTriangle, Loader2, MapPin } from "lucide-react";
 type AcceptPreview = {
   id: string;
   product_name: string;
+  product_link?: string;
   required_card: string;
+  offer_details?: string | null;
+  original_price?: number;
   card_offer_price: number;
   commission_amount: number;
+  expected_payout?: number;
   // Address is intentionally not exposed here — it is only revealed after the
   // deal is accepted, to protect the shopper's privacy.
   delivery_address?: string | null;
@@ -109,9 +113,12 @@ export function AcceptDealDialog({ deal, open, onOpenChange, onSuccess }: Accept
     id: deal.id,
     product_name: deal.product_name,
     required_card: deal.required_card,
+    offer_details: deal.offer_details,
+    original_price: deal.original_price,
     card_offer_price: deal.card_offer_price,
     commission_amount: deal.commission_amount,
   };
+  const payout = display.expected_payout ?? display.card_offer_price + display.commission_amount;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -137,16 +144,32 @@ export function AcceptDealDialog({ deal, open, onOpenChange, onSuccess }: Accept
               <span className="text-sm text-muted-foreground">Required card</span>
               <span className="text-sm font-medium">{display.required_card}</span>
             </div>
+            {display.original_price != null && (
+              <div className="flex justify-between">
+                <span className="text-sm text-muted-foreground">Original price</span>
+                <span className="text-sm font-medium line-through text-muted-foreground">₹{display.original_price.toLocaleString()}</span>
+              </div>
+            )}
+            {display.offer_details && (
+              <div className="flex justify-between gap-3">
+                <span className="text-sm text-muted-foreground shrink-0">Offer details</span>
+                <span className="text-sm font-medium text-right">{display.offer_details}</span>
+              </div>
+            )}
             <div className="flex justify-between">
-              <span className="text-sm text-muted-foreground">You pay at checkout</span>
+              <span className="text-sm text-muted-foreground">You spend (price after card offer)</span>
               <span className="text-sm font-medium">₹{display.card_offer_price.toLocaleString()}</span>
             </div>
-            <div className="flex justify-between pt-2 border-t">
-              <span className="text-sm font-semibold">Your commission</span>
+            <div className="flex justify-between">
+              <span className="text-sm font-semibold">Your reward</span>
               <span className="text-sm font-bold text-success">₹{display.commission_amount.toLocaleString()}</span>
             </div>
+            <div className="flex justify-between pt-2 border-t">
+              <span className="text-sm font-semibold">Expected total payout</span>
+              <span className="text-sm font-bold text-success">₹{payout.toLocaleString()}</span>
+            </div>
             <p className="text-xs text-muted-foreground pt-1">
-              After delivery you'll be reimbursed ₹{display.card_offer_price.toLocaleString()} + commission.
+              After delivery + settlement you're reimbursed what you actually spent (admin-verified) plus your reward.
             </p>
           </div>
 

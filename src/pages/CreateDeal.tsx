@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { DashboardLayout } from "@/components/layout/DashboardLayout";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -8,23 +8,33 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
-import { supabase } from "@/lib/supabase";
+import { supabase, computeServiceFee, type FeePolicy } from "@/lib/supabase";
 import { ArrowLeft, Link as LinkIcon, CreditCard, IndianRupee, Loader2 } from "lucide-react";
 import { Link } from "react-router-dom";
+
+const DEFAULT_FEE_POLICY: FeePolicy = { fee_percent: 20, fee_min: 20, fee_max: 500 };
 
 export default function CreateDeal() {
   const { profile } = useAuth();
   const navigate = useNavigate();
   const { toast } = useToast();
   const [loading, setLoading] = useState(false);
-  
+  const [feePolicy, setFeePolicy] = useState<FeePolicy>(DEFAULT_FEE_POLICY);
+
+  // Live fee policy for the deal summary. DISPLAY ONLY — the backend trigger
+  // recomputes the authoritative fee on insert and ignores anything we send.
+  useEffect(() => {
+    supabase.from("platform_fee_config").select("fee_percent, fee_min, fee_max").eq("id", true).maybeSingle()
+      .then(({ data }) => { if (data) setFeePolicy(data); });
+  }, []);
+
   const [formData, setFormData] = useState({
     product_name: "",
     product_link: "",
     original_price: "",
     card_offer_price: "",
-    expected_buy_price: "",
     required_card: "",
+    offer_details: "",
     commission_amount: "",
     recipient_name: "",
     address_line: "",
@@ -34,16 +44,13 @@ export default function CreateDeal() {
     delivery_instructions: "",
   });
 
-  // Calculate amounts automatically
+  // Live deal summary (mirrors the server formula; server stays authoritative)
   const originalPrice = parseFloat(formData.original_price) || 0;
   const cardOfferPrice = parseFloat(formData.card_offer_price) || 0;
-  const expectedBuyPrice = parseFloat(formData.expected_buy_price) || 0;
   const commissionAmount = parseFloat(formData.commission_amount) || 0;
-  
-  // Card offer price = upfront checkout amount for the card holder
-  const advanceAmount = cardOfferPrice;
-  // Remaining = difference between expected buy price and card offer price
-  const remainingAmount = Math.max(0, expectedBuyPrice - cardOfferPrice);
+  const serviceFee = computeServiceFee(commissionAmount, feePolicy);
+  const totalYouPay = cardOfferPrice + commissionAmount + serviceFee;
+  const youSave = Math.max(0, originalPrice - totalYouPay);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     setFormData(prev => ({
@@ -70,8 +77,8 @@ export default function CreateDeal() {
       return;
     }
 
-    if (advanceAmount <= 0) {
-      toast({ title: "Error", description: "Card offer price must be greater than 0", variant: "destructive" });
+    if (cardOfferPrice <= 0) {
+      toast({ title: "Error", description: "Price after card offer must be greater than 0", variant: "destructive" });
       return;
     }
 
@@ -83,23 +90,14 @@ export default function CreateDeal() {
     if (originalPrice < cardOfferPrice) {
       toast({
         title: "Check your pricing",
-        description: "Original price should be at least the card offer price.",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    if (expectedBuyPrice < cardOfferPrice) {
-      toast({
-        title: "Check your pricing",
-        description: "Expected buy price can't be lower than the card offer price.",
+        description: "Original price should be at least the price after the card offer.",
         variant: "destructive",
       });
       return;
     }
 
     if (commissionAmount < 0) {
-      toast({ title: "Error", description: "Commission can't be negative", variant: "destructive" });
+      toast({ title: "Error", description: "Cardholder reward can't be negative", variant: "destructive" });
       return;
     }
 
@@ -121,14 +119,16 @@ export default function CreateDeal() {
       formData.delivery_instructions.trim(),
     ].filter(Boolean).join("\n");
 
+    // Monetary derivations (service fee, buyer total) are computed SERVER-SIDE
+    // by the deals_set_pricing trigger — nothing we send here can influence them.
     const { error } = await supabase.from("deals").insert({
       merchant_id: profile.id,
       product_name: formData.product_name,
       product_link: formData.product_link,
       original_price: originalPrice,
       card_offer_price: cardOfferPrice,
-      expected_buy_price: expectedBuyPrice,
       required_card: formData.required_card,
+      offer_details: formData.offer_details.trim() || null,
       commission_amount: commissionAmount,
       recipient_name: formData.recipient_name.trim(),
       address_line: formData.address_line.trim(),
@@ -137,8 +137,6 @@ export default function CreateDeal() {
       pincode: formData.pincode.trim(),
       delivery_instructions: formData.delivery_instructions.trim() || null,
       delivery_address: composedAddress,
-      advance_amount: advanceAmount,
-      remaining_amount: remainingAmount,
       status: "pending"
     });
 
@@ -210,7 +208,7 @@ export default function CreateDeal() {
                 </div>
 
                 <div>
-                  <Label htmlFor="required_card">Required Card</Label>
+                  <Label htmlFor="required_card">Required Card / Bank Offer</Label>
                   <div className="relative mt-1">
                     <CreditCard className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
                     <Input
@@ -223,6 +221,18 @@ export default function CreateDeal() {
                       className="pl-10"
                     />
                   </div>
+                </div>
+
+                <div>
+                  <Label htmlFor="offer_details">Offer Details (optional)</Label>
+                  <Textarea
+                    id="offer_details"
+                    name="offer_details"
+                    placeholder="e.g. 10% instant discount on HDFC credit cards, max ₹5,000 off"
+                    value={formData.offer_details}
+                    onChange={handleChange}
+                    className="mt-1 min-h-[60px]"
+                  />
                 </div>
 
                 <div className="pt-2 border-t space-y-4">
@@ -289,7 +299,7 @@ export default function CreateDeal() {
                   </div>
 
                   <div>
-                    <Label htmlFor="card_offer_price">Card Offer Price (₹)</Label>
+                    <Label htmlFor="card_offer_price">Price After Card Offer (₹)</Label>
                     <div className="relative mt-1">
                       <IndianRupee className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
                       <Input
@@ -305,31 +315,11 @@ export default function CreateDeal() {
                         className="pl-10"
                       />
                     </div>
-                    <p className="text-xs text-muted-foreground mt-1">Price after card discount</p>
+                    <p className="text-xs text-muted-foreground mt-1">Expected price after applying the card discount</p>
                   </div>
 
                   <div>
-                    <Label htmlFor="expected_buy_price">Expected Buy Price (₹)</Label>
-                    <div className="relative mt-1">
-                      <IndianRupee className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-                      <Input
-                        id="expected_buy_price"
-                        name="expected_buy_price"
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        placeholder="0"
-                        value={formData.expected_buy_price}
-                        onChange={handleChange}
-                        required
-                        className="pl-10"
-                      />
-                    </div>
-                    <p className="text-xs text-muted-foreground mt-1">What you're willing to pay</p>
-                  </div>
-
-                  <div>
-                    <Label htmlFor="commission_amount">Commission Amount (₹)</Label>
+                    <Label htmlFor="commission_amount">Cardholder Reward (₹)</Label>
                     <div className="relative mt-1">
                       <IndianRupee className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
                       <Input
@@ -345,25 +335,40 @@ export default function CreateDeal() {
                         className="pl-10"
                       />
                     </div>
-                    <p className="text-xs text-muted-foreground mt-1">Cash reward for the card holder</p>
+                    <p className="text-xs text-muted-foreground mt-1">Cash reward that motivates a cardholder to place your order</p>
                   </div>
                 </div>
               </div>
 
-              {/* Summary */}
+              {/* Live deal summary — mirrors the server-side fee policy; the
+                  backend recomputes the authoritative amounts on submit. */}
               <div className="p-4 rounded-xl bg-secondary/50 space-y-2">
                 <h4 className="font-semibold">Deal summary</h4>
                 <div className="flex justify-between text-sm">
-                  <span className="text-muted-foreground">Card offer price</span>
-                  <span className="font-medium">₹{advanceAmount.toLocaleString()}</span>
+                  <span className="text-muted-foreground">Original price</span>
+                  <span className="font-medium">₹{originalPrice.toLocaleString()}</span>
                 </div>
                 <div className="flex justify-between text-sm">
-                  <span className="text-muted-foreground">Expected buy price</span>
-                  <span className="font-medium">₹{expectedBuyPrice.toLocaleString()}</span>
+                  <span className="text-muted-foreground">Price after card offer</span>
+                  <span className="font-medium">₹{cardOfferPrice.toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span className="text-muted-foreground">Cardholder reward</span>
+                  <span className="font-medium">₹{commissionAmount.toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span className="text-muted-foreground">
+                    OfferBridge service fee ({feePolicy.fee_percent}% of reward, min ₹{feePolicy.fee_min}, max ₹{feePolicy.fee_max})
+                  </span>
+                  <span className="font-medium">₹{serviceFee.toLocaleString()}</span>
                 </div>
                 <div className="flex justify-between text-sm pt-2 border-t">
-                  <span className="text-muted-foreground">Commission</span>
-                  <span className="font-bold">₹{commissionAmount.toLocaleString()}</span>
+                  <span className="font-semibold">Total you pay</span>
+                  <span className="font-bold">₹{totalYouPay.toLocaleString()}</span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span className="text-success font-medium">You save</span>
+                  <span className="font-bold text-success">₹{youSave.toLocaleString()}</span>
                 </div>
               </div>
 

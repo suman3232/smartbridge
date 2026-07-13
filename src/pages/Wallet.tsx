@@ -141,7 +141,7 @@ export default function Wallet() {
       <div className="space-y-6">
         <div>
           <h1 className="text-2xl font-bold">Wallet</h1>
-          <p className="text-muted-foreground">Reimbursement + commission from completed deals</p>
+          <p className="text-muted-foreground">Reimbursement + reward from completed deals</p>
         </div>
 
         <Card className="overflow-hidden max-w-md">
@@ -231,7 +231,7 @@ export default function Wallet() {
               <History className="w-5 h-5 text-muted-foreground" />
               <CardTitle>Transaction History</CardTitle>
             </div>
-            <CardDescription>Reimbursements, commissions, and withdrawals</CardDescription>
+            <CardDescription>Reimbursements, rewards, and withdrawals</CardDescription>
           </CardHeader>
           <CardContent>
             {loading ? (
@@ -244,7 +244,7 @@ export default function Wallet() {
               <EmptyState
                 icon={IndianRupee}
                 title="No transactions yet"
-                description="Reimbursements, commissions, and referral rewards will appear here as you complete deals."
+                description="Reimbursements, cardholder rewards, and referral rewards will appear here as you complete deals."
                 compact
               />
             ) : (
