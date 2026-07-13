@@ -501,9 +501,9 @@ export type Database = {
         Relationships: []
       }
       email_outbox: {
-        Row: { id: string; to_user_id: string | null; to_email: string | null; subject: string; body: string; dedup_key: string | null; status: string; created_at: string; sent_at: string | null }
-        Insert: { to_user_id?: string | null; to_email?: string | null; subject: string; body: string; dedup_key?: string | null; status?: string }
-        Update: { status?: string; sent_at?: string | null }
+        Row: { id: string; to_user_id: string | null; to_email: string | null; subject: string; body: string; link: string | null; category: string | null; dedup_key: string | null; status: string; attempts: number; max_attempts: number; next_attempt_at: string; processing_started_at: string | null; locked_by: string | null; provider: string; last_error: string | null; provider_message_id: string | null; created_at: string; updated_at: string; sent_at: string | null }
+        Insert: { to_user_id?: string | null; to_email?: string | null; subject: string; body: string; link?: string | null; category?: string | null; dedup_key?: string | null; status?: string }
+        Update: { status?: string; sent_at?: string | null; last_error?: string | null; provider_message_id?: string | null; attempts?: number; next_attempt_at?: string; processing_started_at?: string | null; locked_by?: string | null }
         Relationships: []
       }
       razorpay_orders: {
@@ -1055,6 +1055,10 @@ export type Database = {
       recompute_payment_states: {
         Args: Record<string, never>
         Returns: number
+      }
+      admin_email_outbox_summary: {
+        Args: Record<string, never>
+        Returns: { status: string; count: number; oldest_created_at: string; newest_created_at: string }[]
       }
       admin_order_search: {
         Args: { p_query: string }

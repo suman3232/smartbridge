@@ -382,10 +382,21 @@ CREATE TABLE IF NOT EXISTS public.email_outbox (
   to_user_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE,
   to_email TEXT,
   subject TEXT NOT NULL,
-  body TEXT NOT NULL,
+  body TEXT NOT NULL,               -- plain-text message; the sender renders branded HTML around it
+  link TEXT,                        -- server-set relative path (e.g. /deals/<id>) for the CTA button
+  category TEXT,                    -- notification type (info/success/warning/error) → template accent
   dedup_key TEXT UNIQUE,
-  status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','sent','failed')),
+  status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','processing','sent','failed')),
+  attempts INT NOT NULL DEFAULT 0,          -- incremented on each claim (survives worker crashes)
+  max_attempts INT NOT NULL DEFAULT 6,
+  next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),  -- backoff gate; claimable only when due
+  processing_started_at TIMESTAMPTZ,        -- lease timestamp set at claim; reclaims rows a crashed worker abandoned
+  locked_by TEXT,                           -- worker/invocation id holding the lease (mark RPCs verify it)
+  provider TEXT NOT NULL DEFAULT 'resend',  -- which sender delivered the row (future multi-provider)
+  last_error TEXT,
+  provider_message_id TEXT,                 -- Resend id, for delivery tracing (no PII)
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   sent_at TIMESTAMPTZ
 );
 
@@ -554,6 +565,24 @@ ALTER TABLE public.referrals ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEF
 ALTER TABLE public.referrals ADD COLUMN IF NOT EXISTS qualified_at TIMESTAMPTZ;
 ALTER TABLE public.referrals ADD COLUMN IF NOT EXISTS reversed_at TIMESTAMPTZ;
 
+-- email_outbox: reconcile the delivery-worker columns onto already-deployed DBs
+-- (the CREATE TABLE above has them; these ALTERs upgrade an existing outbox).
+ALTER TABLE public.email_outbox ADD COLUMN IF NOT EXISTS link TEXT;
+ALTER TABLE public.email_outbox ADD COLUMN IF NOT EXISTS category TEXT;
+ALTER TABLE public.email_outbox ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0;
+ALTER TABLE public.email_outbox ADD COLUMN IF NOT EXISTS max_attempts INT NOT NULL DEFAULT 6;
+ALTER TABLE public.email_outbox ADD COLUMN IF NOT EXISTS next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE public.email_outbox ADD COLUMN IF NOT EXISTS processing_started_at TIMESTAMPTZ;
+ALTER TABLE public.email_outbox ADD COLUMN IF NOT EXISTS locked_by TEXT;
+ALTER TABLE public.email_outbox ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'resend';
+ALTER TABLE public.email_outbox ADD COLUMN IF NOT EXISTS last_error TEXT;
+ALTER TABLE public.email_outbox ADD COLUMN IF NOT EXISTS provider_message_id TEXT;
+ALTER TABLE public.email_outbox ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+-- Widen the status CHECK to allow the 'processing' (claimed) state.
+ALTER TABLE public.email_outbox DROP CONSTRAINT IF EXISTS email_outbox_status_check;
+ALTER TABLE public.email_outbox ADD CONSTRAINT email_outbox_status_check
+  CHECK (status IN ('queued','processing','sent','failed'));
+
 -- ---------------------------------------------------------------------------
 -- Indexes on hot FK / filter columns
 -- ---------------------------------------------------------------------------
@@ -568,6 +597,10 @@ CREATE INDEX IF NOT EXISTS payments_to_idx ON public.payments (to_user_id);
 CREATE INDEX IF NOT EXISTS withdrawal_requests_user_idx ON public.withdrawal_requests (user_id);
 CREATE INDEX IF NOT EXISTS orders_customer_idx ON public.orders (customer_id);
 CREATE INDEX IF NOT EXISTS kycs_user_idx ON public.kycs (user_id, created_at DESC);
+-- Drives the email sender's claim query (find due/reclaimable rows cheaply).
+CREATE INDEX IF NOT EXISTS email_outbox_claimable_idx
+  ON public.email_outbox (next_attempt_at)
+  WHERE status IN ('queued','processing');
 
 -- ---------------------------------------------------------------------------
 -- Enable Row Level Security
@@ -1424,14 +1457,18 @@ BEGIN
   VALUES (deal_record.merchant_id, deal_record.customer_id, p_deal_id, deal_record.commission_amount,
     'commission', 'released', 'Commission for deal "' || deal_record.product_name || '"');
 
-  INSERT INTO public.notifications (user_id, title, message, type, link)
-  VALUES (deal_record.customer_id, 'Payment Credited',
+  -- Dual-channel (in-app + email), idempotent per deal via dedup_key.
+  PERFORM public.notify_and_email(deal_record.customer_id, 'Payment Credited',
     '₹' || payout_amount || ' (reimbursement + commission) credited to your wallet for "' || deal_record.product_name || '".',
-    'success', '/wallet');
+    'success', '/wallet', 'settle_credit:' || p_deal_id,
+    'Your OfferBridge wallet was credited',
+    '₹' || payout_amount || ' (reimbursement + commission) has been credited to your OfferBridge wallet for "' || deal_record.product_name || '". You can withdraw it from your wallet once KYC is approved.');
 
-  INSERT INTO public.notifications (user_id, title, message, type, link)
-  VALUES (deal_record.merchant_id, 'Deal Completed',
-    'Your deal "' || deal_record.product_name || '" is complete.', 'success', '/deals/' || p_deal_id);
+  PERFORM public.notify_and_email(deal_record.merchant_id, 'Deal Completed',
+    'Your deal "' || deal_record.product_name || '" is complete.', 'success', '/deals/' || p_deal_id,
+    'deal_completed:' || p_deal_id,
+    'Your OfferBridge deal is complete',
+    'Your deal "' || deal_record.product_name || '" is now complete. Thanks for using OfferBridge.');
 
   -- Refer & Earn: a referred user qualifies on their first completed deal in
   -- EITHER role, so evaluate both the card holder and the shopper. Each user has
@@ -1691,14 +1728,148 @@ BEGIN
 
   IF p_email_subject IS NOT NULL THEN
     SELECT email INTO v_email FROM public.profiles WHERE id = p_user_id;
-    INSERT INTO public.email_outbox (to_user_id, to_email, subject, body, dedup_key)
-    VALUES (p_user_id, v_email, p_email_subject, p_email_body,
+    -- Persist link + category so the delivery worker can render a branded CTA
+    -- button and accent. Idempotent via the 'email:'-prefixed dedup_key.
+    INSERT INTO public.email_outbox (to_user_id, to_email, subject, body, link, category, dedup_key)
+    VALUES (p_user_id, v_email, p_email_subject, p_email_body, p_link, p_type,
             CASE WHEN p_dedup_key IS NULL THEN NULL ELSE 'email:' || p_dedup_key END)
     ON CONFLICT (dedup_key) DO NOTHING;
   END IF;
 END;
 $$;
 REVOKE EXECUTE ON FUNCTION public.notify_and_email(UUID, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
+
+-- ===========================================================================
+-- Email outbox delivery worker (service-role only)
+-- ---------------------------------------------------------------------------
+-- The email-dispatch edge function drains the outbox through these three RPCs.
+-- Clients (anon/authenticated) can NEVER call them — only the edge function's
+-- service-role key. This is the ONLY write path to email_outbox besides
+-- notify_and_email, so a browser can neither claim, send, nor mark mail.
+-- ===========================================================================
+
+-- Atomically lease a batch of due/reclaimable rows. Concurrent workers can never
+-- grab the same row: FOR UPDATE SKIP LOCKED lets each worker's query skip rows
+-- another has locked, and the flip to 'processing' happens in the same statement.
+-- attempts is bumped AT CLAIM (not on failure) so a worker that dies mid-send
+-- still burns an attempt — a poison row can never spin forever. A row abandoned
+-- in 'processing' (crashed worker) is reclaimable once its lease expires.
+-- p_lease_seconds (default 600 = 10 min) MUST exceed the worst-case time to
+-- process a whole claimed batch (p_limit rows x the 10s per-send timeout), so a
+-- still-in-flight row is never reclaimed and double-sent; it only reclaims rows
+-- from a genuinely crashed worker.
+CREATE OR REPLACE FUNCTION public.claim_email_batch(p_worker TEXT, p_limit INT DEFAULT 10, p_lease_seconds INT DEFAULT 600)
+RETURNS SETOF public.email_outbox
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  -- Dead-letter rows stranded in 'processing' past their lease that have NO
+  -- attempts left (a worker crashed on the final attempt). Because attempts is
+  -- bumped at claim, such a row sits at attempts=max_attempts and the reclaim
+  -- predicate below (attempts < max_attempts) can never pick it up — so without
+  -- this sweep it would stay 'processing' forever, never retried nor failed.
+  UPDATE public.email_outbox
+     SET status = 'failed',
+         last_error = left(COALESCE(last_error || ' | ', '') || 'lease expired at max attempts (worker crash); dead-lettered', 1000),
+         processing_started_at = NULL, locked_by = NULL, updated_at = now()
+   WHERE status = 'processing'
+     AND attempts >= max_attempts
+     AND processing_started_at < now() - make_interval(secs => p_lease_seconds);
+
+  RETURN QUERY
+  WITH ready AS (
+    SELECT id FROM public.email_outbox
+    WHERE to_email IS NOT NULL
+      AND attempts < max_attempts
+      AND (
+        (status = 'queued'     AND next_attempt_at <= now())
+        OR (status = 'processing' AND processing_started_at < now() - make_interval(secs => p_lease_seconds))
+      )
+    ORDER BY next_attempt_at
+    FOR UPDATE SKIP LOCKED
+    LIMIT p_limit
+  )
+  UPDATE public.email_outbox o
+     SET status = 'processing', processing_started_at = now(), locked_by = p_worker,
+         attempts = o.attempts + 1, updated_at = now()
+    FROM ready r
+   WHERE o.id = r.id
+  RETURNING o.*;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.claim_email_batch(TEXT, INT, INT) FROM PUBLIC, anon, authenticated;
+GRANT  EXECUTE ON FUNCTION public.claim_email_batch(TEXT, INT, INT) TO service_role;
+
+-- Terminal success. Guarded on status='processing' AND locked_by=worker so only
+-- the current lease-holder can finalize (a reclaimed stale worker is a no-op) —
+-- and re-running is idempotent (a row already 'sent' matches nothing).
+CREATE OR REPLACE FUNCTION public.mark_email_sent(p_id UUID, p_worker TEXT, p_provider_message_id TEXT)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  UPDATE public.email_outbox
+     SET status = 'sent', sent_at = now(), provider_message_id = p_provider_message_id,
+         last_error = NULL, processing_started_at = NULL, locked_by = NULL, updated_at = now()
+   WHERE id = p_id AND status = 'processing' AND locked_by = p_worker;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.mark_email_sent(UUID, TEXT, TEXT) FROM PUBLIC, anon, authenticated;
+GRANT  EXECUTE ON FUNCTION public.mark_email_sent(UUID, TEXT, TEXT) TO service_role;
+
+-- Failure. Transient (5xx / 429 / network) → requeue with full-jitter exponential
+-- backoff (unless attempts exhausted); permanent (invalid address / 4xx) → terminal
+-- 'failed'. p_retry_after_seconds honors a provider 429 Retry-After. The backoff
+-- horizon (cap 1h × 6 attempts) stays well inside Resend's ~24h idempotency window,
+-- so a reclaim-and-resend is always de-duplicated by the stable Idempotency-Key.
+-- p_error must already be scrubbed (provider name + HTTP code, never PII).
+CREATE OR REPLACE FUNCTION public.mark_email_failed(
+  p_id UUID, p_worker TEXT, p_error TEXT, p_permanent BOOLEAN DEFAULT false, p_retry_after_seconds INT DEFAULT NULL)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE e public.email_outbox; v_delay INT;
+BEGIN
+  SELECT * INTO e FROM public.email_outbox WHERE id = p_id FOR UPDATE;
+  IF e IS NULL OR e.status <> 'processing' OR e.locked_by IS DISTINCT FROM p_worker THEN
+    RETURN;  -- not ours / already finalized / reclaimed
+  END IF;
+
+  IF p_permanent OR e.attempts >= e.max_attempts THEN
+    UPDATE public.email_outbox
+       SET status = 'failed', last_error = left(p_error, 1000),
+           processing_started_at = NULL, locked_by = NULL, updated_at = now()
+     WHERE id = p_id;
+  ELSE
+    -- Full jitter: random point in [0, cap) where cap = min(1h, 60s * 2^(attempts-1)).
+    -- With max_attempts=6 the whole retry span (~30 min) stays far inside Resend's
+    -- idempotency window, so a reclaim-and-resend is always de-duplicated.
+    -- Honor a provider Retry-After but cap it (1h) so a huge value can't push the
+    -- retry beyond the idempotency window; else full-jitter exponential backoff.
+    v_delay := COALESCE(LEAST(p_retry_after_seconds, 3600),
+                        floor(random() * LEAST(3600, 60 * power(2, GREATEST(e.attempts - 1, 0))::int))::int);
+    UPDATE public.email_outbox
+       SET status = 'queued', next_attempt_at = now() + make_interval(secs => GREATEST(v_delay, 5)),
+           last_error = left(p_error, 1000), processing_started_at = NULL, locked_by = NULL, updated_at = now()
+     WHERE id = p_id;
+  END IF;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.mark_email_failed(UUID, TEXT, TEXT, BOOLEAN, INT) FROM PUBLIC, anon, authenticated;
+GRANT  EXECUTE ON FUNCTION public.mark_email_failed(UUID, TEXT, TEXT, BOOLEAN, INT) TO service_role;
+
+-- Admin observability: enqueue always succeeds, so a broken/unconfigured sender
+-- fails INVISIBLY. This surfaces queue health (counts by status + the oldest
+-- still-unsent age) so an admin can spot a stalled worker or a dead-letter pile.
+CREATE OR REPLACE FUNCTION public.admin_email_outbox_summary()
+RETURNS TABLE (status TEXT, count BIGINT, oldest_created_at TIMESTAMPTZ, newest_created_at TIMESTAMPTZ)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF NOT public.is_admin(auth.uid()) THEN RAISE EXCEPTION 'Admins only'; END IF;
+  RETURN QUERY
+  SELECT e.status, count(*)::BIGINT, min(e.created_at), max(e.created_at)
+  FROM public.email_outbox e
+  GROUP BY e.status
+  ORDER BY e.status;
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.admin_email_outbox_summary() FROM PUBLIC, anon;
+GRANT  EXECUTE ON FUNCTION public.admin_email_outbox_summary() TO authenticated;
 
 CREATE OR REPLACE FUNCTION public.log_order_event(
   p_deal_id UUID, p_actor UUID, p_event_type TEXT, p_detail TEXT DEFAULT NULL, p_metadata JSONB DEFAULT NULL)
@@ -2434,9 +2605,11 @@ BEGIN
   INSERT INTO public.withdrawal_requests (user_id, amount, status)
   VALUES (auth.uid(), p_amount, 'pending') RETURNING * INTO new_request;
 
-  INSERT INTO public.notifications (user_id, title, message, type, link)
-  VALUES (auth.uid(), 'Withdrawal requested',
-    '₹' || p_amount || ' withdrawal is pending admin transfer to your bank account.', 'info', '/wallet');
+  PERFORM public.notify_and_email(auth.uid(), 'Withdrawal requested',
+    '₹' || p_amount || ' withdrawal is pending admin transfer to your bank account.', 'info', '/wallet',
+    'wd_requested:' || new_request.id,
+    'Your OfferBridge withdrawal request was received',
+    'Your withdrawal request for ₹' || p_amount || ' has been received and is pending transfer to your bank account.');
 
   RETURN new_request;
 END;
@@ -2447,11 +2620,14 @@ RETURNS public.withdrawal_requests LANGUAGE plpgsql SECURITY DEFINER SET search_
 DECLARE req public.withdrawal_requests;
 BEGIN
   IF NOT public.is_admin(auth.uid()) THEN RAISE EXCEPTION 'Only admins can complete withdrawals'; END IF;
-  SELECT * INTO req FROM public.withdrawal_requests WHERE id = p_request_id;
-  IF req IS NULL OR req.status != 'pending' THEN RAISE EXCEPTION 'Withdrawal request not found or not pending'; END IF;
 
+  -- Atomic, self-gating transition (mirrors complete_deal): a second concurrent
+  -- admin call (double-click / two admins) matches ZERO rows and aborts BEFORE the
+  -- wallet/ledger writes, so the transfer can't be recorded twice nor locked_amount
+  -- over-deducted.
   UPDATE public.withdrawal_requests SET status = 'completed', updated_at = now()
-  WHERE id = p_request_id RETURNING * INTO req;
+  WHERE id = p_request_id AND status = 'pending' RETURNING * INTO req;
+  IF req IS NULL THEN RAISE EXCEPTION 'Withdrawal request not found or not pending'; END IF;
 
   UPDATE public.wallets SET locked_amount = GREATEST(locked_amount - req.amount, 0), updated_at = now()
   WHERE user_id = req.user_id;
@@ -2459,9 +2635,11 @@ BEGIN
   INSERT INTO public.payments (from_user_id, to_user_id, amount, payment_type, status, description)
   VALUES (req.user_id, req.user_id, req.amount, 'withdrawal', 'released', 'Withdrawal transferred to bank account');
 
-  INSERT INTO public.notifications (user_id, title, message, type, link)
-  VALUES (req.user_id, 'Withdrawal completed',
-    '₹' || req.amount || ' has been transferred to your bank account.', 'success', '/wallet');
+  PERFORM public.notify_and_email(req.user_id, 'Withdrawal completed',
+    '₹' || req.amount || ' has been transferred to your bank account.', 'success', '/wallet',
+    'wd_completed:' || req.id,
+    'Your OfferBridge withdrawal is complete',
+    '₹' || req.amount || ' has been transferred to your bank account.');
 
   RETURN req;
 END;
@@ -2473,21 +2651,25 @@ RETURNS public.withdrawal_requests LANGUAGE plpgsql SECURITY DEFINER SET search_
 DECLARE req public.withdrawal_requests;
 BEGIN
   IF NOT public.is_admin(auth.uid()) THEN RAISE EXCEPTION 'Only admins can reject withdrawals'; END IF;
-  SELECT * INTO req FROM public.withdrawal_requests WHERE id = p_request_id;
-  IF req IS NULL OR req.status != 'pending' THEN RAISE EXCEPTION 'Withdrawal request not found or not pending'; END IF;
 
+  -- Atomic, self-gating transition (mirrors complete_deal): without the
+  -- `AND status='pending'` guard, two concurrent rejects would each credit the
+  -- balance += amount, creating money. The second call now matches ZERO rows and
+  -- aborts BEFORE the wallet credit.
   UPDATE public.withdrawal_requests
   SET status = 'rejected', admin_notes = COALESCE(p_notes, 'Withdrawal rejected by admin.'), updated_at = now()
-  WHERE id = p_request_id RETURNING * INTO req;
+  WHERE id = p_request_id AND status = 'pending' RETURNING * INTO req;
+  IF req IS NULL THEN RAISE EXCEPTION 'Withdrawal request not found or not pending'; END IF;
 
   UPDATE public.wallets
   SET balance = balance + req.amount, locked_amount = GREATEST(locked_amount - req.amount, 0), updated_at = now()
   WHERE user_id = req.user_id;
 
-  INSERT INTO public.notifications (user_id, title, message, type, link)
-  VALUES (req.user_id, 'Withdrawal rejected',
+  PERFORM public.notify_and_email(req.user_id, 'Withdrawal rejected',
     COALESCE(p_notes, 'Your withdrawal request was rejected.') || ' ₹' || req.amount || ' returned to your wallet balance.',
-    'error', '/wallet');
+    'error', '/wallet', 'wd_rejected:' || req.id,
+    'Your OfferBridge withdrawal was not processed',
+    COALESCE(p_notes, 'Your withdrawal request was rejected.') || ' ₹' || req.amount || ' has been returned to your wallet balance.');
 
   RETURN req;
 END;
