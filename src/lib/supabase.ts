@@ -59,6 +59,9 @@ export type Deal = {
   payment_status: PaymentStatus;
   payment_reference: string | null;
   payment_proof_url: string | null;
+  payment_method: 'razorpay' | 'manual' | null;
+  order_proof_status: 'pending' | 'verified' | 'rejected' | 'correction';
+  order_proof_reason: string | null;
   buyer_confirmed_at: string | null;
   settled_at: string | null;
   dispute_status: 'open' | 'resolved' | 'rejected' | null;
@@ -75,7 +78,8 @@ export const DEAL_SAFE_COLUMNS =
   "id, merchant_id, customer_id, product_name, product_link, original_price, card_offer_price, " +
   "expected_buy_price, advance_amount, remaining_amount, commission_amount, required_card, " +
   "admin_contact_number, reserved_at, reserved_until, estimated_delivery_date, payment_due_date, " +
-  "payment_status, payment_submitted_at, payment_verified_at, buyer_confirmed_at, settled_at, " +
+  "payment_status, payment_method, order_proof_status, order_proof_verified_at, order_proof_reason, " +
+  "payment_submitted_at, payment_verified_at, buyer_confirmed_at, settled_at, " +
   "dispute_status, status, admin_notes, created_at, updated_at";
 
 export type PaymentStatus =

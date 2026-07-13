@@ -233,7 +233,9 @@ if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
     rec('proof within window accepted (fulfilled)', !acc.error && !placed.error, placed.error?.message);
     const { data: v } = await holder2.c.rpc('get_deal_for_viewer', { p_deal_id: d3 });
     rec('timer cleared and deal moved to in_progress', v?.[0]?.status === 'in_progress' && v?.[0]?.reserved_until === null, JSON.stringify({ status: v?.[0]?.status, ru: v?.[0]?.reserved_until }));
-    // New-flow settlement requires verified payment + buyer receipt confirmation.
+    // New-flow settlement: admin verifies order proof → buyer pays → admin verifies
+    // payment → buyer confirms receipt.
+    await admin.rpc('admin_verify_order_proof', { p_deal_id: d3, p_action: 'approve' });
     await shopper.c.rpc('submit_buyer_payment', { p_deal_id: d3, p_reference: `UTR-${RUN}` });
     await admin.rpc('admin_verify_payment', { p_deal_id: d3, p_approve: true });
     await shopper.c.rpc('buyer_confirm_receipt', { p_deal_id: d3 });

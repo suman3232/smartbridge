@@ -143,8 +143,15 @@ CREATE TABLE IF NOT EXISTS public.deals (
     CHECK (payment_status IN ('not_due','due_soon','due','overdue','submitted','verified','refunded','disputed')),
   payment_reference TEXT,
   payment_proof_url TEXT,
+  payment_method TEXT CHECK (payment_method IN ('razorpay','manual')),  -- how a verified payment was confirmed
   payment_submitted_at TIMESTAMPTZ,
   payment_verified_at TIMESTAMPTZ,
+  -- Admin review of the card holder's initial order proof. The buyer is NOT asked
+  -- to pay until an admin verifies the order proof.
+  order_proof_status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (order_proof_status IN ('pending','verified','rejected','correction')),
+  order_proof_verified_at TIMESTAMPTZ,
+  order_proof_reason TEXT,
   buyer_confirmed_at TIMESTAMPTZ,           -- buyer confirmed receipt
   settled_at TIMESTAMPTZ,                   -- wallet credited (idempotency guard)
   dispute_status TEXT CHECK (dispute_status IN ('open','resolved','rejected')),
@@ -382,6 +389,25 @@ CREATE TABLE IF NOT EXISTS public.email_outbox (
   sent_at TIMESTAMPTZ
 );
 
+-- Razorpay order ↔ OfferBridge deal mapping + payment lifecycle. Written ONLY by
+-- the edge functions (service role); clients read their own for status. The
+-- amount is server-authoritative (never trusted from the browser).
+CREATE TABLE IF NOT EXISTS public.razorpay_orders (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  deal_id UUID NOT NULL REFERENCES public.deals(id) ON DELETE CASCADE,
+  razorpay_order_id TEXT NOT NULL UNIQUE,
+  amount_paise BIGINT NOT NULL CHECK (amount_paise > 0),
+  currency TEXT NOT NULL DEFAULT 'INR',
+  status TEXT NOT NULL DEFAULT 'created' CHECK (status IN ('created','paid','failed')),
+  razorpay_payment_id TEXT,
+  failure_reason TEXT,
+  verified_at TIMESTAMPTZ,
+  created_by UUID REFERENCES public.profiles(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS razorpay_orders_deal_idx ON public.razorpay_orders (deal_id, created_at DESC);
+
 -- Idempotent notifications: a unique key prevents duplicate reminders from
 -- repeated sweeps / retries / refreshes.
 ALTER TABLE public.notifications ADD COLUMN IF NOT EXISTS dedup_key TEXT;
@@ -455,8 +481,12 @@ ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS payment_due_date DATE;
 ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS payment_status TEXT NOT NULL DEFAULT 'not_due';
 ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS payment_reference TEXT;
 ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS payment_proof_url TEXT;
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS payment_method TEXT;
 ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS payment_submitted_at TIMESTAMPTZ;
 ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS payment_verified_at TIMESTAMPTZ;
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS order_proof_status TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS order_proof_verified_at TIMESTAMPTZ;
+ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS order_proof_reason TEXT;
 ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS buyer_confirmed_at TIMESTAMPTZ;
 ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS settled_at TIMESTAMPTZ;
 ALTER TABLE public.deals ADD COLUMN IF NOT EXISTS dispute_status TEXT;
@@ -563,6 +593,7 @@ ALTER TABLE public.cardholder_reliability ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.delivery_codes         ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.order_events           ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.email_outbox           ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.razorpay_orders        ENABLE ROW LEVEL SECURITY;
 
 -- ---------------------------------------------------------------------------
 -- Core security-definer helpers (needed by policies below)
@@ -859,6 +890,16 @@ DROP POLICY IF EXISTS "Admins read email outbox" ON public.email_outbox;
 CREATE POLICY "Admins read email outbox" ON public.email_outbox
   FOR SELECT USING (public.is_admin(auth.uid()));
 
+-- razorpay_orders: the deal's participants + admins can READ status; only the
+-- edge functions (service role, which bypasses RLS) write. No client write policy.
+DROP POLICY IF EXISTS "Participants or admin read razorpay orders" ON public.razorpay_orders;
+CREATE POLICY "Participants or admin read razorpay orders" ON public.razorpay_orders
+  FOR SELECT USING (
+    public.is_admin(auth.uid())
+    OR EXISTS (SELECT 1 FROM public.deals d WHERE d.id = razorpay_orders.deal_id
+               AND (d.merchant_id = auth.uid() OR d.customer_id = auth.uid()))
+  );
+
 -- ---------------------------------------------------------------------------
 -- Utility + signup trigger functions
 -- ---------------------------------------------------------------------------
@@ -1137,55 +1178,125 @@ BEGIN
      AND deal_record.reserved_until < now() THEN
     RAISE EXCEPTION 'Your reservation window has expired. The deal is reopening for other card holders.';
   END IF;
-  IF deal_record.status != 'accepted' THEN
+  IF deal_record.status != 'accepted'
+     AND NOT (deal_record.status = 'in_progress' AND deal_record.order_proof_status IN ('rejected','correction')) THEN
     RAISE EXCEPTION 'Your reservation is no longer active. The deal must be reserved before placing an order.';
   END IF;
+
+  -- Insert on first submission; UPDATE on a resubmission after admin rejection /
+  -- correction request (order already exists but proof isn't verified).
   IF EXISTS (SELECT 1 FROM public.orders WHERE deal_id = p_deal_id) THEN
-    RAISE EXCEPTION 'Order already placed for this deal';
+    IF deal_record.order_proof_status NOT IN ('rejected','correction') THEN
+      RAISE EXCEPTION 'Order already submitted for this deal';
+    END IF;
+    -- Preserve fields the resubmission doesn't re-send (COALESCE) so a partial
+    -- correction doesn't wipe platform / tracking / amount captured the first time.
+    UPDATE public.orders SET
+      tracking_id = COALESCE(NULLIF(TRIM(COALESCE(p_tracking_id, '')), ''), tracking_id),
+      order_screenshot_url = NULLIF(TRIM(p_order_screenshot_url), ''),
+      marketplace_order_id = TRIM(p_marketplace_order_id),
+      platform = COALESCE(NULLIF(TRIM(COALESCE(p_platform, '')), ''), platform),
+      amount_paid = COALESCE(p_amount_paid, amount_paid),
+      delivery_code_type = COALESCE(p_delivery_code_type, delivery_code_type), updated_at = now()
+    WHERE deal_id = p_deal_id RETURNING * INTO new_order;
+  ELSE
+    INSERT INTO public.orders (deal_id, customer_id, tracking_id, order_screenshot_url,
+      marketplace_order_id, platform, amount_paid, delivery_code_type, status)
+    VALUES (p_deal_id, auth.uid(), NULLIF(TRIM(p_tracking_id), ''), NULLIF(TRIM(p_order_screenshot_url), ''),
+      TRIM(p_marketplace_order_id), NULLIF(TRIM(COALESCE(p_platform, '')), ''), p_amount_paid,
+      COALESCE(p_delivery_code_type, 'none'), 'placed')
+    RETURNING * INTO new_order;
   END IF;
 
-  INSERT INTO public.orders (deal_id, customer_id, tracking_id, order_screenshot_url,
-    marketplace_order_id, platform, amount_paid, delivery_code_type, status)
-  VALUES (p_deal_id, auth.uid(), NULLIF(TRIM(p_tracking_id), ''), NULLIF(TRIM(p_order_screenshot_url), ''),
-    TRIM(p_marketplace_order_id), NULLIF(TRIM(COALESCE(p_platform, '')), ''), p_amount_paid,
-    COALESCE(p_delivery_code_type, 'none'), 'placed')
-  RETURNING * INTO new_order;
-
-  -- Payment becomes due one day before the estimated delivery date.
+  -- Payment schedule is recorded, but the buyer is NOT asked to pay yet — the
+  -- order proof must be verified by an admin first. Timer stops; order proof goes
+  -- to 'pending' for admin review; payment stays 'not_due'.
   v_due := p_estimated_delivery_date - 1;
-  v_pstatus := CASE
-    WHEN CURRENT_DATE > v_due THEN 'overdue'
-    WHEN CURRENT_DATE >= v_due THEN 'due'
-    WHEN v_due - CURRENT_DATE <= 2 THEN 'due_soon'
-    ELSE 'not_due' END;
-
-  -- Advance the lifecycle, stop the countdown, set the payment schedule.
   UPDATE public.deals SET
     status = 'in_progress', reserved_at = NULL, reserved_until = NULL,
     estimated_delivery_date = p_estimated_delivery_date, payment_due_date = v_due,
-    payment_status = CASE WHEN payment_status IN ('submitted','verified','refunded') THEN payment_status ELSE v_pstatus END,
+    order_proof_status = 'pending', order_proof_reason = NULL,
     updated_at = now()
   WHERE id = p_deal_id;
 
   INSERT INTO public.reservation_events (deal_id, user_id, event_type, reserved_at, reserved_until, detail)
   VALUES (p_deal_id, auth.uid(), 'fulfilled', deal_record.reserved_at, deal_record.reserved_until, 'Order proof submitted within the window');
 
-  PERFORM public.log_order_event(p_deal_id, auth.uid(), 'order_placed',
-    'Order ' || TRIM(p_marketplace_order_id) || ' placed; est. delivery ' || to_char(p_estimated_delivery_date, 'DD Mon YYYY'),
+  PERFORM public.log_order_event(p_deal_id, auth.uid(),
+    CASE WHEN deal_record.order_proof_status IN ('rejected','correction') THEN 'order_resubmitted' ELSE 'order_placed' END,
+    'Order ' || TRIM(p_marketplace_order_id) || ' submitted; est. delivery ' || to_char(p_estimated_delivery_date, 'DD Mon YYYY'),
     jsonb_build_object('order_id', TRIM(p_marketplace_order_id), 'platform', p_platform, 'estimated_delivery', p_estimated_delivery_date, 'delivery_code_type', COALESCE(p_delivery_code_type,'none')));
 
+  -- Buyer is told the order is placed & under review — NOT asked to pay.
   PERFORM public.notify_and_email(deal_record.merchant_id,
-    'Order placed',
-    'Your order for "' || deal_record.product_name || '" is placed. Estimated delivery ' || to_char(p_estimated_delivery_date, 'DD Mon YYYY')
-      || '. Payment of ₹' || deal_record.expected_buy_price || ' is due by ' || to_char(v_due, 'DD Mon YYYY') || '.',
-    'success', '/deals/' || p_deal_id,
-    'order_placed:' || p_deal_id,
-    'Your OfferBridge order has been placed',
-    'Your order for "' || deal_record.product_name || '" has been placed. Estimated delivery: '
-      || to_char(p_estimated_delivery_date, 'DD Mon YYYY') || '. Payment of ₹' || deal_record.expected_buy_price
-      || ' is due by ' || to_char(v_due, 'DD Mon YYYY') || '.');
+    'Order placed — under review',
+    'Your order for "' || deal_record.product_name || '" was placed and is being verified by OfferBridge. We''ll ask for payment once it''s approved.',
+    'info', '/deals/' || p_deal_id, NULL,
+    'Your OfferBridge order is placed and under review',
+    'Your order for "' || deal_record.product_name || '" has been placed and is being verified. You will be asked to pay once it is approved.');
+
+  -- Notify all admins to verify the order proof.
+  PERFORM public.notify_and_email(ur.user_id, 'Order proof awaiting verification',
+    'Verify the order proof for "' || deal_record.product_name || '" (order ' || TRIM(p_marketplace_order_id) || ').',
+    'info', '/admin', NULL, NULL, NULL)
+  FROM public.user_roles ur WHERE ur.role = 'admin';
 
   RETURN new_order;
+END;
+$$;
+
+-- Admin reviews the card holder's order proof. Only after 'approve' is the buyer
+-- asked to pay. 'reject'/'correction' require a reason and bounce it back to the
+-- card holder to resubmit.
+CREATE OR REPLACE FUNCTION public.admin_verify_order_proof(p_deal_id UUID, p_action TEXT, p_reason TEXT DEFAULT NULL)
+RETURNS public.deals LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE d public.deals; v_due DATE; v_pstatus TEXT;
+BEGIN
+  IF NOT public.is_admin(auth.uid()) THEN RAISE EXCEPTION 'Only admins can verify order proof'; END IF;
+  IF p_action NOT IN ('approve','reject','correction') THEN RAISE EXCEPTION 'Invalid action'; END IF;
+  SELECT * INTO d FROM public.deals WHERE id = p_deal_id FOR UPDATE;
+  IF d IS NULL THEN RAISE EXCEPTION 'Deal not found'; END IF;
+  IF NOT EXISTS (SELECT 1 FROM public.orders WHERE deal_id = p_deal_id) THEN
+    RAISE EXCEPTION 'No order proof to verify yet';
+  END IF;
+  IF d.order_proof_status = 'verified' THEN RAISE EXCEPTION 'Order proof is already verified'; END IF;
+
+  IF p_action = 'approve' THEN
+    v_due := d.estimated_delivery_date - 1;
+    v_pstatus := CASE
+      WHEN d.payment_status IN ('submitted','verified','refunded') THEN d.payment_status
+      WHEN CURRENT_DATE > v_due THEN 'overdue'
+      WHEN CURRENT_DATE >= v_due THEN 'due'
+      WHEN v_due - CURRENT_DATE <= 2 THEN 'due_soon'
+      ELSE 'not_due' END;
+    UPDATE public.deals SET order_proof_status = 'verified', order_proof_verified_at = now(),
+      order_proof_reason = NULL, payment_status = v_pstatus, updated_at = now()
+    WHERE id = p_deal_id RETURNING * INTO d;
+    PERFORM public.log_order_event(p_deal_id, auth.uid(), 'order_proof_verified', NULL, NULL);
+    -- NOW ask the buyer to pay (in-app + email), with exact amount + deadline.
+    PERFORM public.notify_and_email(d.merchant_id, 'Payment requested',
+      'Your order for "' || d.product_name || '" is verified. Pay ₹' || d.expected_buy_price
+        || ' by ' || to_char(v_due, 'DD Mon YYYY') || ' (one day before delivery). Open the order to pay now.',
+      'info', '/deals/' || p_deal_id, 'pay_request:' || p_deal_id,
+      'Payment requested for your OfferBridge order',
+      'Your order for "' || d.product_name || '" has been verified. Please pay ₹' || d.expected_buy_price
+        || ' by ' || to_char(v_due, 'DD Mon YYYY') || '. Open your order in OfferBridge to pay now.');
+  ELSE
+    IF NULLIF(TRIM(COALESCE(p_reason, '')), '') IS NULL THEN
+      RAISE EXCEPTION 'A reason is required to reject or request a correction';
+    END IF;
+    UPDATE public.deals SET order_proof_status = p_action, order_proof_reason = TRIM(p_reason), updated_at = now()
+    WHERE id = p_deal_id RETURNING * INTO d;
+    PERFORM public.log_order_event(p_deal_id, auth.uid(), 'order_proof_' || p_action, TRIM(p_reason), NULL);
+    -- Bounce back to the CARD HOLDER (not the buyer) to resubmit. Buyer not billed.
+    PERFORM public.notify_and_email(d.customer_id,
+      CASE WHEN p_action = 'reject' THEN 'Order proof rejected' ELSE 'Order proof needs correction' END,
+      'Your order proof for "' || d.product_name || '" needs attention: ' || TRIM(p_reason) || ' Please resubmit.',
+      'error', '/deals/' || p_deal_id, NULL,
+      'Action needed on your OfferBridge order proof',
+      'Your order proof for "' || d.product_name || '" needs attention: ' || TRIM(p_reason) || ' Please resubmit it.');
+  END IF;
+  RETURN d;
 END;
 $$;
 
@@ -1721,7 +1832,9 @@ BEGIN
 END;
 $$;
 
--- Buyer submits payment proof (admin-mediated model — no gateway; admin verifies).
+-- Manual/admin-mediated fallback: buyer submits payment proof; an admin verifies.
+-- Razorpay is the primary path (gateway-verified). Only allowed once the ORDER
+-- PROOF has been admin-verified.
 CREATE OR REPLACE FUNCTION public.submit_buyer_payment(
   p_deal_id UUID, p_reference TEXT, p_proof_url TEXT DEFAULT NULL)
 RETURNS public.deals LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
@@ -1733,6 +1846,9 @@ BEGIN
   IF d.merchant_id IS DISTINCT FROM auth.uid() THEN RAISE EXCEPTION 'Only the buyer can submit payment for this order'; END IF;
   IF NOT EXISTS (SELECT 1 FROM public.orders WHERE deal_id = p_deal_id) THEN
     RAISE EXCEPTION 'You can pay after the card holder has placed the order';
+  END IF;
+  IF d.order_proof_status <> 'verified' THEN
+    RAISE EXCEPTION 'Payment opens only after an admin verifies the order proof';
   END IF;
   IF d.payment_status = 'verified' THEN RAISE EXCEPTION 'Payment is already verified'; END IF;
   IF NULLIF(TRIM(COALESCE(p_reference, '')), '') IS NULL AND NULLIF(TRIM(COALESCE(p_proof_url, '')), '') IS NULL THEN
@@ -1765,11 +1881,16 @@ BEGIN
   SELECT * INTO d FROM public.deals WHERE id = p_deal_id FOR UPDATE;
   IF d IS NULL THEN RAISE EXCEPTION 'Deal not found'; END IF;
 
+  IF d.order_proof_status <> 'verified' THEN
+    RAISE EXCEPTION 'Verify the order proof before verifying payment';
+  END IF;
   IF p_approve THEN
-    UPDATE public.deals SET payment_status = 'verified', payment_verified_at = now(),
+    IF d.payment_status = 'verified' THEN RETURN d; END IF;  -- idempotent
+    UPDATE public.deals SET payment_status = 'verified', payment_method = 'manual', payment_verified_at = now(),
       admin_notes = COALESCE(p_notes, admin_notes), updated_at = now()
     WHERE id = p_deal_id RETURNING * INTO d;
-    PERFORM public.log_order_event(p_deal_id, auth.uid(), 'payment_verified', p_notes, NULL);
+    PERFORM public.log_order_event(p_deal_id, auth.uid(), 'payment_verified', COALESCE(p_notes, 'manual verification'),
+      jsonb_build_object('method', 'manual'));
     PERFORM public.notify_and_email(d.merchant_id, 'Payment verified',
       'Your payment for "' || d.product_name || '" is verified. Any delivery OTP/PIN can now be released to you.',
       'success', '/deals/' || p_deal_id, 'payment_verified:' || p_deal_id,
@@ -1789,6 +1910,107 @@ BEGIN
   RETURN d;
 END;
 $$;
+
+-- ---------------------------------------------------------------------------
+-- Razorpay gateway (server-side only). These are called ONLY by the edge
+-- functions running with the service role; EXECUTE is revoked from clients so a
+-- browser can never mark a payment verified. The authoritative amount is
+-- re-derived from the deal here — never trusted from the caller.
+-- ---------------------------------------------------------------------------
+-- Record a freshly-created Razorpay order for a deal (called after the edge
+-- function created it on Razorpay). Validates the amount + gate before storing.
+CREATE OR REPLACE FUNCTION public.gateway_record_razorpay_order(
+  p_deal_id UUID, p_razorpay_order_id TEXT, p_amount_paise BIGINT, p_currency TEXT, p_created_by UUID)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE d public.deals; expected BIGINT;
+BEGIN
+  SELECT * INTO d FROM public.deals WHERE id = p_deal_id;
+  IF d IS NULL THEN RAISE EXCEPTION 'Deal not found'; END IF;
+  IF d.order_proof_status <> 'verified' THEN RAISE EXCEPTION 'Order proof not verified'; END IF;
+  IF d.payment_status = 'verified' THEN RAISE EXCEPTION 'Payment already verified'; END IF;
+  IF p_created_by IS DISTINCT FROM d.merchant_id THEN RAISE EXCEPTION 'Only the buyer can pay for this order'; END IF;
+  expected := ROUND(d.expected_buy_price * 100)::BIGINT;
+  IF p_amount_paise <> expected THEN RAISE EXCEPTION 'Amount mismatch (expected % paise)', expected; END IF;
+  IF COALESCE(p_currency, 'INR') <> 'INR' THEN RAISE EXCEPTION 'Only INR is supported'; END IF;
+
+  INSERT INTO public.razorpay_orders (deal_id, razorpay_order_id, amount_paise, currency, status, created_by)
+  VALUES (p_deal_id, p_razorpay_order_id, p_amount_paise, 'INR', 'created', p_created_by)
+  ON CONFLICT (razorpay_order_id) DO NOTHING;
+  PERFORM public.log_order_event(p_deal_id, p_created_by, 'razorpay_order_created',
+    'Razorpay order created', jsonb_build_object('razorpay_order_id', p_razorpay_order_id, 'amount_paise', p_amount_paise));
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.gateway_record_razorpay_order(UUID, TEXT, BIGINT, TEXT, UUID) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.gateway_record_razorpay_order(UUID, TEXT, BIGINT, TEXT, UUID) TO service_role;
+
+-- Confirm a captured Razorpay payment. Atomic + idempotent + fully guarded
+-- (amount, currency, order↔deal mapping). This is the ONLY path (besides the
+-- admin manual fallback) that can set payment_status='verified'.
+CREATE OR REPLACE FUNCTION public.gateway_confirm_razorpay_payment(
+  p_razorpay_order_id TEXT, p_razorpay_payment_id TEXT, p_amount_paise BIGINT, p_currency TEXT)
+RETURNS TEXT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE ro public.razorpay_orders; d public.deals; expected BIGINT;
+BEGIN
+  -- Lock the mapping row: serializes concurrent webhook + client-verify callbacks.
+  SELECT * INTO ro FROM public.razorpay_orders WHERE razorpay_order_id = p_razorpay_order_id FOR UPDATE;
+  IF ro IS NULL THEN RAISE EXCEPTION 'Unknown Razorpay order'; END IF;
+
+  -- Idempotent: a second callback for the same order is a no-op.
+  IF ro.status = 'paid' THEN RETURN 'already_paid'; END IF;
+
+  -- Guard amount + currency against the STORED (server-set) values and re-derive
+  -- the expected amount from the deal (defence against cross-deal reuse).
+  SELECT * INTO d FROM public.deals WHERE id = ro.deal_id FOR UPDATE;
+  IF d IS NULL THEN RAISE EXCEPTION 'Deal not found for order'; END IF;
+  expected := ROUND(d.expected_buy_price * 100)::BIGINT;
+  IF p_amount_paise <> ro.amount_paise OR p_amount_paise <> expected THEN
+    -- Fail safe: do NOT verify. We deliberately do not write a 'failed' row here
+    -- because this RAISE aborts (and would roll back) the same transaction; the
+    -- caller (edge function) logs the anomaly. The order simply stays 'created'
+    -- and unpaid — no money moves.
+    RAISE EXCEPTION 'Amount mismatch: paid % vs expected %', p_amount_paise, expected;
+  END IF;
+  IF COALESCE(p_currency, 'INR') <> ro.currency THEN
+    RAISE EXCEPTION 'Currency mismatch';
+  END IF;
+
+  UPDATE public.razorpay_orders SET status = 'paid', razorpay_payment_id = p_razorpay_payment_id,
+    verified_at = now(), updated_at = now()
+  WHERE razorpay_order_id = p_razorpay_order_id;
+
+  -- Mark the deal paid (idempotent: only if not already verified).
+  IF d.payment_status <> 'verified' THEN
+    UPDATE public.deals SET payment_status = 'verified', payment_method = 'razorpay',
+      payment_reference = p_razorpay_payment_id, payment_verified_at = now(), updated_at = now()
+    WHERE id = ro.deal_id;
+    PERFORM public.log_order_event(ro.deal_id, d.merchant_id, 'payment_verified',
+      'Razorpay payment captured', jsonb_build_object('method', 'razorpay',
+        'razorpay_order_id', p_razorpay_order_id, 'razorpay_payment_id', p_razorpay_payment_id));
+    PERFORM public.notify_and_email(d.merchant_id, 'Payment successful',
+      'Your payment for "' || d.product_name || '" was received. Any delivery OTP/PIN can now be released to you.',
+      'success', '/deals/' || ro.deal_id, 'payment_verified:' || ro.deal_id,
+      'Your OfferBridge payment was successful',
+      'Your payment for "' || d.product_name || '" was received and verified.');
+    PERFORM public.notify_and_email(d.customer_id, 'Buyer paid',
+      'The buyer paid for "' || d.product_name || '".', 'success', '/deals/' || ro.deal_id,
+      'buyer_paid:' || ro.deal_id, NULL, NULL);
+  END IF;
+  RETURN 'verified';
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.gateway_confirm_razorpay_payment(TEXT, TEXT, BIGINT, TEXT) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.gateway_confirm_razorpay_payment(TEXT, TEXT, BIGINT, TEXT) TO service_role;
+
+-- Mark a Razorpay order failed/abandoned (payment.failed webhook or client cancel).
+CREATE OR REPLACE FUNCTION public.gateway_fail_razorpay_order(p_razorpay_order_id TEXT, p_reason TEXT)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  UPDATE public.razorpay_orders SET status = 'failed', failure_reason = LEFT(COALESCE(p_reason, 'failed'), 200), updated_at = now()
+  WHERE razorpay_order_id = p_razorpay_order_id AND status = 'created';
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.gateway_fail_razorpay_order(TEXT, TEXT) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.gateway_fail_razorpay_order(TEXT, TEXT) TO service_role;
 
 -- Card holder records the delivery OTP/PIN/open-box code (written to the locked
 -- delivery_codes table; never readable directly by anyone).
@@ -1940,7 +2162,9 @@ BEGIN
   FOR r IN
     SELECT id, merchant_id, product_name, expected_buy_price, payment_due_date, payment_status, estimated_delivery_date
     FROM public.deals
-    WHERE status = 'in_progress' AND payment_due_date IS NOT NULL
+    -- Only chase payment once the order proof is admin-verified (the buyer isn't
+    -- asked to pay before that).
+    WHERE status = 'in_progress' AND payment_due_date IS NOT NULL AND order_proof_status = 'verified'
   LOOP
     -- Only the un-settled payment states auto-advance; verified/refunded/disputed
     -- are left untouched, but the deal is still scanned so a paid buyer still gets
@@ -1987,6 +2211,9 @@ $$;
 -- Admin/support order search (by marketplace order id, tracking, deal id, buyer,
 -- or card holder). Admin-only — this is the ONE place the buyer's private phone is
 -- exposed, for delivery coordination. Does NOT return the delivery code value.
+-- DROP first: CREATE OR REPLACE cannot widen a RETURNS TABLE on a DB where a
+-- prior version is already deployed (idempotent re-run safety).
+DROP FUNCTION IF EXISTS public.admin_order_search(text);
 CREATE OR REPLACE FUNCTION public.admin_order_search(p_query TEXT)
 RETURNS TABLE (
   deal_id UUID, product_name TEXT, deal_status TEXT,
@@ -1995,6 +2222,7 @@ RETURNS TABLE (
   recipient_name TEXT, address_line TEXT, city TEXT, state TEXT, pincode TEXT, legacy_address TEXT,
   marketplace_order_id TEXT, courier TEXT, tracking_id TEXT,
   estimated_delivery_date DATE, payment_due_date DATE, payment_status TEXT,
+  order_proof_status TEXT, payment_method TEXT,
   delivery_code_type TEXT, dispute_status TEXT, created_at TIMESTAMPTZ
 ) LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
 DECLARE q TEXT;
@@ -2008,6 +2236,7 @@ BEGIN
     d.recipient_name, d.address_line, d.city, d.state, d.pincode, d.delivery_address,
     o.marketplace_order_id, o.courier, o.tracking_id,
     d.estimated_delivery_date, d.payment_due_date, d.payment_status,
+    d.order_proof_status, d.payment_method,
     o.delivery_code_type, d.dispute_status, d.created_at
   FROM public.deals d
   LEFT JOIN public.orders o ON o.deal_id = d.id
@@ -2087,7 +2316,8 @@ RETURNS TABLE (
   reserved_at TIMESTAMPTZ, reserved_until TIMESTAMPTZ, server_now TIMESTAMPTZ,
   estimated_delivery_date DATE, payment_due_date DATE, payment_status TEXT,
   payment_reference TEXT, payment_proof_url TEXT, buyer_confirmed_at TIMESTAMPTZ,
-  settled_at TIMESTAMPTZ, dispute_status TEXT, has_delivery_code BOOLEAN
+  settled_at TIMESTAMPTZ, dispute_status TEXT, has_delivery_code BOOLEAN,
+  order_proof_status TEXT, order_proof_reason TEXT, payment_method TEXT
 ) LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
 BEGIN
   IF auth.uid() IS NULL THEN RAISE EXCEPTION 'Sign in to view deal details'; END IF;
@@ -2109,7 +2339,8 @@ BEGIN
     CASE WHEN public.is_admin(auth.uid()) OR d.merchant_id = auth.uid() THEN d.payment_reference ELSE NULL END,
     CASE WHEN public.is_admin(auth.uid()) OR d.merchant_id = auth.uid() THEN d.payment_proof_url ELSE NULL END,
     d.buyer_confirmed_at, d.settled_at, d.dispute_status,
-    EXISTS (SELECT 1 FROM public.delivery_codes dc WHERE dc.deal_id = d.id AND dc.cleared_at IS NULL)
+    EXISTS (SELECT 1 FROM public.delivery_codes dc WHERE dc.deal_id = d.id AND dc.cleared_at IS NULL),
+    d.order_proof_status, d.order_proof_reason, d.payment_method
   FROM public.deals d
   WHERE d.id = p_deal_id AND (
     public.is_admin(auth.uid()) OR d.merchant_id = auth.uid() OR d.customer_id = auth.uid()

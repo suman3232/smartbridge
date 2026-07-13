@@ -62,8 +62,12 @@ export type Database = {
           payment_status: string
           payment_reference: string | null
           payment_proof_url: string | null
+          payment_method: string | null
           payment_submitted_at: string | null
           payment_verified_at: string | null
+          order_proof_status: string
+          order_proof_verified_at: string | null
+          order_proof_reason: string | null
           buyer_confirmed_at: string | null
           settled_at: string | null
           dispute_status: string | null
@@ -100,8 +104,12 @@ export type Database = {
           payment_status?: string
           payment_reference?: string | null
           payment_proof_url?: string | null
+          payment_method?: string | null
           payment_submitted_at?: string | null
           payment_verified_at?: string | null
+          order_proof_status?: string
+          order_proof_verified_at?: string | null
+          order_proof_reason?: string | null
           buyer_confirmed_at?: string | null
           settled_at?: string | null
           dispute_status?: string | null
@@ -133,6 +141,9 @@ export type Database = {
           payment_status?: string
           payment_reference?: string | null
           payment_proof_url?: string | null
+          payment_method?: string | null
+          order_proof_status?: string
+          order_proof_reason?: string | null
           buyer_confirmed_at?: string | null
           settled_at?: string | null
           dispute_status?: string | null
@@ -493,6 +504,12 @@ export type Database = {
         Row: { id: string; to_user_id: string | null; to_email: string | null; subject: string; body: string; dedup_key: string | null; status: string; created_at: string; sent_at: string | null }
         Insert: { to_user_id?: string | null; to_email?: string | null; subject: string; body: string; dedup_key?: string | null; status?: string }
         Update: { status?: string; sent_at?: string | null }
+        Relationships: []
+      }
+      razorpay_orders: {
+        Row: { id: string; deal_id: string; razorpay_order_id: string; amount_paise: number; currency: string; status: string; razorpay_payment_id: string | null; failure_reason: string | null; verified_at: string | null; created_by: string | null; created_at: string; updated_at: string }
+        Insert: { deal_id: string; razorpay_order_id: string; amount_paise: number; currency?: string; status?: string; created_by?: string | null }
+        Update: { status?: string; razorpay_payment_id?: string | null; failure_reason?: string | null; verified_at?: string | null }
         Relationships: []
       }
       notifications: {
@@ -1011,6 +1028,10 @@ export type Database = {
         Args: { p_deal_id: string; p_approve: boolean; p_notes?: string | null }
         Returns: Database["public"]["Tables"]["deals"]["Row"]
       }
+      admin_verify_order_proof: {
+        Args: { p_deal_id: string; p_action: string; p_reason?: string | null }
+        Returns: Database["public"]["Tables"]["deals"]["Row"]
+      }
       set_delivery_code: {
         Args: { p_deal_id: string; p_code_type: string; p_code_value: string; p_ttl_minutes?: number }
         Returns: undefined
@@ -1058,6 +1079,8 @@ export type Database = {
           estimated_delivery_date: string | null
           payment_due_date: string | null
           payment_status: string
+          order_proof_status: string
+          payment_method: string | null
           delivery_code_type: string | null
           dispute_status: string | null
           created_at: string
@@ -1131,6 +1154,9 @@ export type Database = {
           settled_at: string | null
           dispute_status: string | null
           has_delivery_code: boolean
+          order_proof_status: string
+          order_proof_reason: string | null
+          payment_method: string | null
         }[]
       }
       release_deal: {

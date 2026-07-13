@@ -128,7 +128,30 @@ if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
     });
     rec('valid order placed (screenshot + order id + edd)', !ok.error, ok.error?.message);
     const dv = (await buyer.c.rpc('get_deal_for_viewer', { p_deal_id: D })).data?.[0];
+    rec('order proof starts as pending (awaiting admin verification)', dv?.order_proof_status === 'pending', `proof=${dv?.order_proof_status}`);
     rec('payment due date = delivery − 1 day', dv?.payment_due_date === new Date(Date.now()).toISOString().slice(0, 10), `due=${dv?.payment_due_date}`);
+  }
+
+  // ---- ADMIN ORDER-PROOF VERIFICATION GATE ----
+  {
+    const earlyPay = await buyer.c.rpc('submit_buyer_payment', { p_deal_id: D, p_reference: 'X' });
+    sec('buyer CANNOT pay before admin approves the order proof', !!earlyPay.error && /order proof/i.test(earlyPay.error.message), earlyPay.error?.message);
+    const selfApprove = await holder.c.rpc('admin_verify_order_proof', { p_deal_id: D, p_action: 'approve' });
+    sec('card holder CANNOT approve their own order proof', !!selfApprove.error);
+    const nBefore = (await buyer.c.from('notifications').select('id', { count: 'exact', head: true }).eq('user_id', buyer.id).eq('dedup_key', `pay_request:${D}`)).count ?? 0;
+    const approve = await admin.rpc('admin_verify_order_proof', { p_deal_id: D, p_action: 'approve' });
+    rec('admin approves order proof', !approve.error && approve.data?.order_proof_status === 'verified', approve.error?.message);
+    const nAfter = (await buyer.c.from('notifications').select('id', { count: 'exact', head: true }).eq('user_id', buyer.id).eq('dedup_key', `pay_request:${D}`)).count ?? 0;
+    rec('buyer gets payment request ONLY after approval', nBefore === 0 && nAfter === 1, `before=${nBefore} after=${nAfter}`);
+  }
+
+  // ---- Frontend cannot forge payment_status; gateway RPCs are server-only ----
+  {
+    const forge = await buyer.c.from('deals').update({ payment_status: 'verified' }).eq('id', D);
+    const dv = (await buyer.c.rpc('get_deal_for_viewer', { p_deal_id: D })).data?.[0];
+    sec('buyer CANNOT forge payment_status=verified via direct update', dv?.payment_status !== 'verified', `status=${dv?.payment_status} err=${forge.error?.message ?? 'no-op'}`);
+    sec('gateway_confirm_razorpay_payment not client-callable', !!(await buyer.c.rpc('gateway_confirm_razorpay_payment', { p_razorpay_order_id: 'x', p_razorpay_payment_id: 'y', p_amount_paise: 1, p_currency: 'INR' })).error);
+    sec('gateway_record_razorpay_order not client-callable', !!(await buyer.c.rpc('gateway_record_razorpay_order', { p_deal_id: D, p_razorpay_order_id: 'x', p_amount_paise: 1, p_currency: 'INR', p_created_by: buyer.id })).error);
   }
 
   // Card holder sets the delivery OTP.
@@ -142,7 +165,7 @@ if (!ADMIN_EMAIL || !ADMIN_PASSWORD) {
     rec('card holder (who set it) can read the code', !holderView.error && holderView.data?.[0]?.code_value === '481516');
   }
 
-  // Buyer pays; admin verifies; now the buyer can read it.
+  // Buyer pays (manual fallback, since Razorpay needs live keys); admin verifies.
   await buyer.c.rpc('submit_buyer_payment', { p_deal_id: D, p_reference: `UTR-${RUN}` });
   {
     const stillLocked = await buyer.c.rpc('get_delivery_code', { p_deal_id: D });
