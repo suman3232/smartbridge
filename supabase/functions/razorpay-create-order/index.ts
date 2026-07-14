@@ -75,7 +75,9 @@ Deno.serve(async (req) => {
     body: JSON.stringify({
       amount: amountPaise,
       currency: "INR",
-      receipt: `deal_${deal.id}`,
+      // Razorpay caps `receipt` at 40 chars. "deal_" + a 36-char UUID = 41 → 400.
+      // The bare UUID (36) is unique + traceable and fits.
+      receipt: deal.id,
       notes: { deal_id: deal.id, buyer_id: user.id },
       payment_capture: 1,
     }),

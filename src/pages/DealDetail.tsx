@@ -50,11 +50,8 @@ export default function DealDetail() {
   const [order, setOrder] = useState<OrderRow | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
-  const [trackingId, setTrackingId] = useState("");
   const [marketplaceOrderId, setMarketplaceOrderId] = useState("");
-  const [platform, setPlatform] = useState("");
   const [estDelivery, setEstDelivery] = useState("");
-  const [deliveryCodeType, setDeliveryCodeType] = useState("none");
   const [screenshotPath, setScreenshotPath] = useState("");
   const [screenshotSignedUrl, setScreenshotSignedUrl] = useState<string | null>(null);
   const [serverNow, setServerNow] = useState<string | null>(null);
@@ -142,14 +139,13 @@ export default function DealDetail() {
     }
     setActionLoading(true);
 
+    // Stage 2: submit ONLY the three mandatory fields. Tracking/courier/platform
+    // and the delivery-code type are collected later (shipping + delivery day).
     const { error } = await supabase.rpc("place_deal_order", {
       p_deal_id: deal.id,
-      p_tracking_id: trackingId.trim() || null,
       p_order_screenshot_url: screenshotPath.trim() || null,
       p_marketplace_order_id: marketplaceOrderId.trim(),
-      p_platform: platform.trim() || null,
       p_estimated_delivery_date: estDelivery,
-      p_delivery_code_type: deliveryCodeType,
     });
 
     setActionLoading(false);
@@ -439,6 +435,9 @@ export default function DealDetail() {
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
+              {/* Stage 2 — only the 3 mandatory initial-proof fields. Courier,
+                  tracking/AWB and any delivery OTP/PIN come LATER (after it ships
+                  and on delivery day), not here. */}
               <div className="grid sm:grid-cols-2 gap-4">
                 <div>
                   <Label htmlFor="mordid">Marketplace order ID</Label>
@@ -446,29 +445,9 @@ export default function DealDetail() {
                     placeholder="e.g. 402-1234567-8901234" className="mt-1" />
                 </div>
                 <div>
-                  <Label htmlFor="platform">Platform (optional)</Label>
-                  <Input id="platform" value={platform} onChange={(e) => setPlatform(e.target.value)}
-                    placeholder="Marketplace name" className="mt-1" />
-                </div>
-                <div>
                   <Label htmlFor="edd">Estimated delivery date</Label>
                   <Input id="edd" type="date" value={estDelivery} onChange={(e) => setEstDelivery(e.target.value)} className="mt-1" />
                 </div>
-                <div>
-                  <Label htmlFor="tracking">Tracking ID (optional now)</Label>
-                  <Input id="tracking" value={trackingId} onChange={(e) => setTrackingId(e.target.value)}
-                    placeholder="AWB / tracking number" className="mt-1" />
-                </div>
-              </div>
-              <div>
-                <Label>Delivery verification needed?</Label>
-                <select value={deliveryCodeType} onChange={(e) => setDeliveryCodeType(e.target.value)}
-                  className="mt-1 w-full h-10 rounded-md border border-input bg-background px-3 text-sm">
-                  <option value="none">No OTP/PIN needed</option>
-                  <option value="otp">Delivery OTP</option>
-                  <option value="pin">Delivery PIN</option>
-                  <option value="openbox">Open-box code</option>
-                </select>
               </div>
               <div>
                 <Label>Order screenshot</Label>
@@ -482,7 +461,8 @@ export default function DealDetail() {
                   />
                 </div>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Order screenshot, order ID and estimated delivery date are required.
+                  Only the order ID, screenshot and estimated delivery date are needed now.
+                  You'll add courier/tracking after it ships, and any delivery OTP/PIN on delivery day.
                 </p>
               </div>
               <div className="flex flex-col gap-2 sm:flex-row">

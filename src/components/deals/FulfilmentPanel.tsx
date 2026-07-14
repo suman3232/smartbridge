@@ -98,13 +98,37 @@ export function FulfilmentPanel({ deal, order, isBuyer, isCardHolder, isAdmin, o
     if (url) { setShotUrl(url); window.open(url, "_blank", "noopener,noreferrer"); }
   };
 
+  // Turn a raw server/edge error into a safe, actionable message (never leak
+  // stack traces, keys, or DB internals to the buyer).
+  const friendlyPayError = (serverMsg: string, status?: number): string => {
+    const m = (serverMsg || "").toLowerCase();
+    if (status === 401 || m.includes("sign in")) return "Your session expired — please sign in again.";
+    if (m.includes("order proof")) return "The order proof hasn't been approved yet. You'll be able to pay once an admin verifies it.";
+    if (m.includes("revis")) return "Please accept or decline the revised price before paying.";
+    if (m.includes("already paid") || m.includes("already verified")) return "This order is already paid.";
+    if (m.includes("only the buyer")) return "Only the buyer can pay for this order.";
+    if (m.includes("not configured")) return "The payment gateway isn't configured yet. Please contact support.";
+    if (m.includes("amount")) return "The payment amount couldn't be calculated. Please refresh and try again.";
+    if (status && status >= 500) return "Payment service is temporarily unavailable. Please try again in a moment.";
+    return "Couldn't start payment. Please try again.";
+  };
+
   // ---- Razorpay: create order → checkout → server verify ----
   const payWithRazorpay = async () => {
     setBusy("rzp");
     const { data, error } = await supabase.functions.invoke("razorpay-create-order", { body: { deal_id: deal.id } });
     if (error || !data?.razorpay_order_id) {
       setBusy(null);
-      toast({ title: "Couldn't start payment", description: (data as { error?: string })?.error ?? error?.message ?? "Try again", variant: "destructive" });
+      // supabase-js puts the failed Response on error.context; read the server's
+      // { error } body so we can show a specific, safe reason.
+      let serverMsg = (data as { error?: string })?.error ?? "";
+      let status: number | undefined;
+      const ctx = (error as { context?: Response })?.context;
+      if (ctx && typeof ctx.json === "function") {
+        status = ctx.status;
+        try { serverMsg = (await ctx.json())?.error ?? serverMsg; } catch { /* non-JSON body */ }
+      }
+      toast({ title: "Couldn't start payment", description: friendlyPayError(serverMsg, status), variant: "destructive" });
       return;
     }
     const ok = await loadRazorpay();
@@ -269,12 +293,14 @@ export function FulfilmentPanel({ deal, order, isBuyer, isCardHolder, isAdmin, o
         </Card>
       )}
 
-      {/* CARD HOLDER: set delivery code */}
-      {isCardHolder && order && needsCode && deal.status === "in_progress" && proofVerified && (
+      {/* CARD HOLDER: add delivery OTP/PIN — Stage 5, only AFTER the order has
+          shipped (out for delivery), only if a code is needed, and only until one
+          is set. Never shown during placement or shipping. */}
+      {isCardHolder && order && needsCode && order.status === "shipped" && !deal.has_delivery_code && deal.status === "in_progress" && (
         <Card className="border-primary/20">
           <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base"><KeyRound className="w-4 h-4" /> Delivery {order?.delivery_code_type}</CardTitle>
-            <CardDescription>Enter the {order?.delivery_code_type}. It stays locked until the buyer's payment is verified.</CardDescription>
+            <CardTitle className="flex items-center gap-2 text-base"><KeyRound className="w-4 h-4" /> Add delivery {order?.delivery_code_type}</CardTitle>
+            <CardDescription>Add this only when the courier shares it (usually on delivery day). It stays locked until the buyer's payment is verified.</CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col sm:flex-row gap-3">
             <Input value={codeValue} onChange={(e) => setCodeValue(e.target.value)} placeholder={`Enter the ${order?.delivery_code_type}`} className="flex-1" />

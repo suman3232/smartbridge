@@ -22,13 +22,20 @@
 // Deploy:   supabase functions deploy email-dispatch --no-verify-jwt
 //           (--no-verify-jwt: the caller is pg_cron/Resend-less; auth is the
 //            x-cron-secret shared secret, not a Supabase user JWT.)
-// Secrets:  supabase secrets set RESEND_API_KEY=re_xxx
-//           supabase secrets set CRON_SECRET=<random-32-bytes>
+// Secrets:  supabase secrets set CRON_SECRET=<random-32-bytes>
 //           supabase secrets set EMAIL_FROM="OfferBridge <no-reply@your-domain>"   (optional)
 //           supabase secrets set APP_URL="https://smartbridge-gold.vercel.app"     (optional)
+//   Sender — pick ONE:
+//     (a) SMTP (delivers to ANY recipient, no verified domain — the no-domain fix):
+//         supabase secrets set SMTP_HOST=smtp.gmail.com SMTP_PORT=465 \
+//           SMTP_USERNAME=you@gmail.com SMTP_PASSWORD=<16-char-app-password>
+//     (b) Resend HTTP (onboarding@resend.dev only reaches the Resend owner):
+//         supabase secrets set RESEND_API_KEY=re_xxx
+//   If SMTP_* are set they win; otherwise it falls back to RESEND_API_KEY.
 //           SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY are injected automatically.
 // ---------------------------------------------------------------------------
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { SMTPClient } from "https://deno.land/x/denomailer@1.6.0/mod.ts";
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -127,14 +134,31 @@ Deno.serve(async (req) => {
   const provided = req.headers.get("x-cron-secret") ?? "";
   if (!timingSafeEqual(provided, cronSecret)) return json({ error: "Unauthorized" }, 401);
 
+  // Two senders. SMTP (e.g. Gmail app-password) is used when SMTP_* secrets are
+  // set — it delivers to ANY recipient without a verified domain, the practical
+  // no-domain fix. Otherwise fall back to the Resend HTTP API (which, on the
+  // shared onboarding@resend.dev sender, only reaches the Resend account owner).
+  const SMTP_HOST = Deno.env.get("SMTP_HOST");
+  const SMTP_PORT = Number(Deno.env.get("SMTP_PORT") ?? "465");
+  const SMTP_USER = Deno.env.get("SMTP_USERNAME");
+  const SMTP_PASS = Deno.env.get("SMTP_PASSWORD");
   const RESEND_API_KEY = Deno.env.get("RESEND_API_KEY");
-  if (!RESEND_API_KEY) return json({ error: "Email provider not configured (RESEND_API_KEY missing)" }, 503);
-  const FROM = Deno.env.get("EMAIL_FROM") ?? "OfferBridge <onboarding@resend.dev>";
+  const useSmtp = !!(SMTP_HOST && SMTP_USER && SMTP_PASS);
+  if (!useSmtp && !RESEND_API_KEY) {
+    return json({ error: "Email not configured (set SMTP_* or RESEND_API_KEY)" }, 503);
+  }
+  const FROM = Deno.env.get("EMAIL_FROM") ??
+    (useSmtp ? `OfferBridge <${SMTP_USER}>` : "OfferBridge <onboarding@resend.dev>");
   const APP_URL = Deno.env.get("APP_URL") ?? "https://smartbridge-gold.vercel.app";
 
   const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
   const worker = crypto.randomUUID();
   const deadline = Date.now() + 25_000; // stay well under the function wall-clock
+
+  // One reusable SMTP connection for the whole batch (Gmail handshake is slow).
+  const smtp = useSmtp
+    ? new SMTPClient({ connection: { hostname: SMTP_HOST!, port: SMTP_PORT, tls: SMTP_PORT === 465, auth: { username: SMTP_USER!, password: SMTP_PASS! } } })
+    : null;
 
   let claimed = 0, sent = 0, failed = 0, retried = 0;
 
@@ -156,6 +180,24 @@ Deno.serve(async (req) => {
       const subject = String(r.subject ?? "").replace(/[\r\n]+/g, " ").slice(0, 200); // header hygiene
       const { html, text } = renderEmail({ subject, body: r.body ?? "", ctaUrl, category: r.category ?? null });
 
+      if (smtp) {
+        // ---- SMTP path (Gmail app-password etc.): delivers to any recipient ----
+        try {
+          await smtp.send({ from: FROM, to: r.to_email, subject, content: text, html });
+          await admin.rpc("mark_email_sent", { p_id: r.id, p_worker: worker, p_provider_message_id: `smtp:${r.id}` });
+          sent++;
+        } catch (e) {
+          // A 5xx / auth / connection issue is transient (retry); a hard reject of
+          // the address (5.1.x / "no such user") is permanent. Never log the body.
+          const msg = e instanceof Error ? e.message : "smtp error";
+          const permanent = /5\.1\.|no such user|does not exist|rejected recipient|invalid recipient/i.test(msg);
+          await admin.rpc("mark_email_failed", { p_id: r.id, p_worker: worker, p_error: `smtp: ${msg.slice(0, 80)}`, p_permanent: permanent });
+          permanent ? failed++ : retried++;
+        }
+        continue;
+      }
+
+      // ---- Resend HTTP path (fallback) ----
       try {
         const ctrl = new AbortController();
         const t = setTimeout(() => ctrl.abort(), 10_000);
@@ -200,5 +242,6 @@ Deno.serve(async (req) => {
     }
   }
 
+  if (smtp) { try { await smtp.close(); } catch { /* best effort */ } }
   return json({ ok: true, worker, claimed, sent, failed, retried });
 });
